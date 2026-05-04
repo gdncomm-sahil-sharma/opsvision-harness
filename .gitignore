@@ -1,0 +1,91 @@
+# Environment variables and API keys
+.env
+.env.local
+.env.production
+.env.development
+*.key
+*.secret
+*api-key*
+*API_KEY*
+
+# Java/Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# Maven
+.mvn/
+mvnw
+mvnw.cmd
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Spring Boot
+application-*.properties
+application-*.yml
+!application-test.yml
+
+# Build tools
+build/
+dist/
+out/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Executable files
+*.exe
+*.bat
+*.sh
+*.command
+!setup-env.sh
+
+# Node modules (if any frontend)
+node_modules/
+
+# Test coverage
+coverage/
+*.coverage
+.nyc_output
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*
