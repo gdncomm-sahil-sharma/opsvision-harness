@@ -382,6 +382,13 @@ public class DynamicMcpService {
         }
     }
     
+    /**
+     * Alias for invalidateToolCache() for API consistency
+     */
+    public void clearToolCache() {
+        invalidateToolCache();
+    }
+    
     // Data classes
     public static class ToolDescriptor {
         private final String name;
