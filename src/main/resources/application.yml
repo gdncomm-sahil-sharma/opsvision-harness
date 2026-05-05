@@ -29,6 +29,8 @@ spring:
       host: localhost
       port: 6379
       timeout: 3000ms
+      repositories:
+        enabled: false
       lettuce:
         pool:
           max-active: 10
@@ -39,14 +41,14 @@ spring:
   ai:
     # OpenAI Configuration
     openai:
-      api-key: ${OPENAI_API_KEY:}
+      api-key: ${OPENAI_API_KEY}
       chat:
         options:
           model: ${OPENAI_MODEL:gpt-4.1-nano}
           temperature: ${OPENAI_TEMPERATURE:0.1}
           max-tokens: ${OPENAI_MAX_TOKENS:2000}
     
-    # MCP Client Configuration - Streamable HTTP Transport  
+    # MCP Client Configuration - Streamable HTTP Transport
     mcp:
       enabled: true
       client:

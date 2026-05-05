@@ -33,6 +33,9 @@ mvnw.cmd
 *.swo
 *~
 
+# Claude Code tooling artifacts
+.claude/
+
 # OS files
 .DS_Store
 .DS_Store?
