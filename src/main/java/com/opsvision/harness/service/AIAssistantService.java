@@ -231,11 +231,61 @@ public class AIAssistantService {
         if (redisTemplate == null || value == null || value.isEmpty()) {
             return;
         }
+        if (looksLikeEntityNotFound(value)) {
+            log.debug("Skipping cache for not-found result key={}", key);
+            return;
+        }
         try {
             redisTemplate.opsForValue().set(key, value, toolResultsTtl);
         } catch (Exception e) {
             log.debug("Cache store failed for key {}: {}", key, e.getMessage());
         }
+    }
+
+    /**
+     * Detect MCP responses that represent "entity not found" — typically a top-level
+     * object whose substantive fields are all null or empty. Caching those poisons
+     * follow-ups when the original tool call was wrong (e.g. PP code fed to
+     * getPickList): a retry hits the cached null and reports "not found" again.
+     *
+     * MCP wraps tool output as [{"text": "<inner-json>"}], so unwrap that envelope
+     * before checking.
+     */
+    private boolean looksLikeEntityNotFound(String value) {
+        try {
+            JsonNode root = objectMapper.readTree(value);
+            JsonNode payload = unwrapMcpEnvelope(root);
+            if (payload == null || !payload.isObject() || payload.isEmpty()) {
+                return false;
+            }
+            int substantive = 0;
+            var iter = payload.fields();
+            while (iter.hasNext()) {
+                JsonNode field = iter.next().getValue();
+                if (field == null || field.isNull()) continue;
+                if (field.isArray() && field.isEmpty()) continue;
+                if (field.isObject() && field.isEmpty()) continue;
+                if (field.isTextual() && field.asText().isEmpty()) continue;
+                substantive++;
+            }
+            return substantive == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private JsonNode unwrapMcpEnvelope(JsonNode root) {
+        if (root.isArray() && !root.isEmpty()) {
+            JsonNode first = root.get(0);
+            if (first.isObject() && first.has("text") && first.get("text").isTextual()) {
+                try {
+                    return objectMapper.readTree(first.get("text").asText());
+                } catch (Exception e) {
+                    return null;
+                }
+            }
+        }
+        return root;
     }
 
     private final class RecordingToolCallback implements ToolCallback {
