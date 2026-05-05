@@ -4,11 +4,11 @@ server:
 spring:
   application:
     name: opsvision-harness
-  
+
   datasource:
     url: jdbc:postgresql://localhost:5432/opsvision
     username: ${DB_USERNAME:opsvision}
-    password: ${DB_PASSWORD:opsvision}
+    password: ${DB_PASSWORD:password}
     driver-class-name: org.postgresql.Driver
   
   jpa:
@@ -54,11 +54,21 @@ spring:
       client:
         enabled: true
         type: SYNC
-        request-timeout: 30s
+        request-timeout: 60s
+        connection-timeout: 10s
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1s
+          multiplier: 2.0
         streamable-http:
           connections:
             opsvision-mcp-server:
               url: "http://localhost:8081/mcp"
+              keep-alive: true
+              connection-pool-size: 5
+              session-timeout: 300s
+
 
 
 
@@ -74,11 +84,29 @@ resilience4j:
   circuitbreaker:
     instances:
       mcp-client:
-        failure-rate-threshold: 50
-        wait-duration-in-open-state: 30s
-        sliding-window-size: 10
-        minimum-number-of-calls: 5
-        permitted-number-of-calls-in-half-open-state: 3
+        failure-rate-threshold: 70
+        wait-duration-in-open-state: 15s
+        sliding-window-size: 20
+        minimum-number-of-calls: 3
+        permitted-number-of-calls-in-half-open-state: 5
+        automatic-transition-from-open-to-half-open-enabled: true
+        slow-call-rate-threshold: 80
+        slow-call-duration-threshold: 30s
+        record-exceptions:
+          - org.springframework.ai.tool.execution.ToolExecutionException
+          - java.net.SocketException
+          - java.net.ConnectException
+          - io.modelcontextprotocol.spec.McpTransportSessionNotFoundException
+  retry:
+    instances:
+      mcp-tool:
+        max-attempts: 3
+        wait-duration: 1s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - org.springframework.ai.tool.execution.ToolExecutionException
+          - java.net.SocketException
+          - io.modelcontextprotocol.spec.McpTransportSessionNotFoundException
 
 # Actuator Configuration
 management:

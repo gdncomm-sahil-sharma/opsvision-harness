@@ -52,9 +52,9 @@ public class OpenAiChatModelConfig {
      * OpenAI Chat options configuration
      */
     public static class Options {
-        private String model;
-        private Float temperature;
-        private Integer maxTokens;
+        private String model = "gpt-4o-mini";
+        private Float temperature = 0.1f;
+        private Integer maxTokens = 2000;
         private Float topP;
         private Integer topK;
         private String[] stop;

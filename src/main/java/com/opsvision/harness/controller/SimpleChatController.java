@@ -4,9 +4,10 @@ import com.opsvision.harness.model.dto.ChatMessage;
 import com.opsvision.harness.model.dto.ChatResponse;
 import com.opsvision.harness.service.SimpleChatService;
 import com.opsvision.harness.service.DynamicMcpService;
+import com.opsvision.harness.service.McpSessionHealthMonitor;
+import com.opsvision.harness.service.ToolCallbackTestService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -14,7 +15,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.Map;
 
-// TODO: local-dev wildcard CORS — restrict before any non-local deployment.
 @RestController
 @RequestMapping("/api/chat")
 @CrossOrigin(origins = "*")
@@ -24,12 +24,15 @@ public class SimpleChatController {
 
     @Autowired
     private SimpleChatService chatService;
-
+    
     @Autowired
     private DynamicMcpService dynamicMcpService;
-
+    
     @Autowired
-    private ChatClient chatClient;
+    private McpSessionHealthMonitor sessionHealthMonitor;
+    
+    @Autowired
+    private ToolCallbackTestService testService;
 
     /**
      * Main chat endpoint - LLM decides everything dynamically
@@ -127,25 +130,34 @@ public class SimpleChatController {
     }
 
     /**
-     * Raw OpenAI smoke-test — bypasses MCP and SimpleChatService.
+     * Get MCP session health status
      */
-    @PostMapping("/test")
-    public ResponseEntity<Map<String, Object>> test(@RequestBody ChatMessage message) {
+    @GetMapping("/session/health")
+    public ResponseEntity<Map<String, Object>> getSessionHealth() {
         try {
-            String response = chatClient.prompt()
-                .user(message.getMessage())
-                .call()
-                .content();
-            Map<String, Object> body = new HashMap<>();
-            body.put("response", response);
-            body.put("status", "success");
-            return ResponseEntity.ok(body);
+            var metrics = sessionHealthMonitor.getHealthMetrics();
+            
+            Map<String, Object> health = new HashMap<>();
+            health.put("healthy", metrics.isHealthy());
+            health.put("last_successful_check", new java.util.Date(metrics.getLastSuccessfulCheck()));
+            health.put("consecutive_failures", metrics.getConsecutiveFailures());
+            health.put("time_since_last_success_ms", metrics.getTimeSinceLastSuccess());
+            
+            if (metrics.isHealthy()) {
+                health.put("status", "UP");
+                health.put("message", "MCP session is healthy");
+                return ResponseEntity.ok(health);
+            } else {
+                health.put("status", "DEGRADED");
+                health.put("message", "MCP session experiencing issues");
+                return ResponseEntity.status(503).body(health);
+            }
+            
         } catch (Exception e) {
-            log.error("OpenAI smoke-test failed", e);
-            Map<String, Object> body = new HashMap<>();
-            body.put("error", e.getMessage());
-            body.put("status", "error");
-            return ResponseEntity.status(500).body(body);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("status", "DOWN");
+            errorResponse.put("error", "Failed to check session health: " + e.getMessage());
+            return ResponseEntity.status(500).body(errorResponse);
         }
     }
 
@@ -169,6 +181,26 @@ public class SimpleChatController {
             log.error("Failed to refresh tools", e);
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("error", "Failed to refresh tools: " + e.getMessage());
+            return ResponseEntity.status(500).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Test endpoint to explore ToolCallback methods
+     */
+    @GetMapping("/test-toolcallback")
+    public ResponseEntity<?> testToolCallback() {
+        try {
+            testService.exploreToolCallbackMethods();
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("message", "Tool callback methods explored - check logs");
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Failed to explore tool callback methods", e);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("error", "Failed to explore methods: " + e.getMessage());
             return ResponseEntity.status(500).body(errorResponse);
         }
     }

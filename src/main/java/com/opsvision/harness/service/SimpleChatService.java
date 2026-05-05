@@ -13,8 +13,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -48,26 +46,23 @@ public class SimpleChatService {
     }
 
     /**
-     * Process user message with dynamic tool discovery and execution
+     * Process user message with dynamic tool discovery and intelligent parameter extraction
      */
     public ChatResponse processMessage(String userId, String message) {
         try {
             log.info("🔍 Processing message for user: {}", userId);
-            
-            // Extract order ID if present
-            String orderId = extractOrderId(message);
-            log.info("📝 Extracted order ID: {}", orderId != null ? orderId : "None");
+            log.info("📝 User message: '{}'", message);
             
             // Dynamically discover available tools
             String availableToolsDescription = dynamicMcpService.getToolDescriptionsForLLM();
             log.info("🛠️ Available tools discovered dynamically");
             
-            // Let LLM choose which tools to invoke
+            // Let LLM choose which tools to invoke based on message and available tools
             List<String> selectedTools = letLLMChooseTools(message, availableToolsDescription);
             log.info("🎯 LLM selected tools: {}", selectedTools);
             
-            // Execute selected tools and get real data
-            List<ToolExecutionResult> toolResults = dynamicMcpService.executeSelectedTools(selectedTools, orderId);
+            // Execute selected tools with intelligent parameter extraction
+            List<ToolExecutionResult> toolResults = dynamicMcpService.executeSelectedTools(selectedTools, message);
             log.info("⚡ Executed {} tools successfully", toolResults.size());
             
             // Generate intelligent response with actual data analysis
@@ -98,17 +93,25 @@ public class SimpleChatService {
      */
     private List<String> letLLMChooseTools(String userMessage, String availableToolsDescription) {
         String toolSelectionPrompt = String.format("""
-            Available Tools:
+            Available Warehouse Investigation Tools:
             %s
             
-            User Message: "%s"
+            User Request: "%s"
             
-            Based on the user's request and available tools above, respond with ONLY a comma-separated list of tool names to execute.
+            Analyze the user's request and select the most appropriate tools to fulfill their needs.
             
-            Choose tools that best match the user's question from the available tools list.
-            Multiple tools can be selected if needed.
+            Guidelines:
+            - If they mention order/pick package/pick list IDs, use tools that work with those entities
+            - If they ask about stock/inventory, use inventory-related tools  
+            - If they need task status, use task-related tools
+            - If they want tracing/history, use trace/history tools
+            - If they need bulk search, use find/search tools
+            - If they want validation/checks, use evaluation tools
             
-            Respond with tool names only, no explanations:""", 
+            Respond with ONLY a comma-separated list of tool names to execute.
+            Multiple tools can be selected if they provide complementary information.
+            
+            Tool names only, no explanations:""", 
             availableToolsDescription, userMessage);
             
         try {
@@ -173,30 +176,4 @@ public class SimpleChatService {
         }
     }
     
-    /**
-     * Extract order ID from user message using regex patterns
-     */
-    private String extractOrderId(String message) {
-        if (message == null) return null;
-        
-        // Common patterns for order IDs
-        Pattern[] patterns = {
-            Pattern.compile("\\b(ORD-\\d+)\\b", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("\\border[\\s:]*([A-Z0-9\\-]+)\\b", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("\\b([A-Z]{2,3}-\\d{3,})\\b"),
-            Pattern.compile("\\b(\\d{6,})\\b") // Fallback for numeric IDs
-        };
-        
-        for (Pattern pattern : patterns) {
-            Matcher matcher = pattern.matcher(message);
-            if (matcher.find()) {
-                String orderId = matcher.group(1);
-                log.debug("📝 Found order ID: {}", orderId);
-                return orderId;
-            }
-        }
-        
-        // Default order ID for testing if none found
-        return "ORD-12345";
-    }
 }
