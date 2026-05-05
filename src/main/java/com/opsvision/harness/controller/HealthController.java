@@ -1,7 +1,7 @@
 package com.opsvision.harness.controller;
 
-import com.opsvision.harness.service.ai.ChatService;
 import com.opsvision.harness.service.DynamicMcpService;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.ResponseEntity;
@@ -29,7 +29,7 @@ public class HealthController {
     private DynamicMcpService dynamicMcpService;
     
     @Autowired
-    private ChatService chatService;
+    private ChatModel chatModel;
 
     @GetMapping
     public ResponseEntity<Map<String, Object>> health() {
@@ -79,9 +79,9 @@ public class HealthController {
             overallHealth = false;
         }
         
-        // AI Service health
+        // AI Service health — bean wiring only; avoid a live LLM round trip on every probe
         try {
-            boolean aiHealthy = chatService.isHealthy();
+            boolean aiHealthy = chatModel != null;
             health.put("ai_service", aiHealthy ? "UP" : "DOWN");
             if (!aiHealthy) overallHealth = false;
         } catch (Exception e) {
