@@ -44,9 +44,10 @@ spring:
       api-key: ${OPENAI_API_KEY}
       chat:
         options:
-          model: ${OPENAI_MODEL:gpt-4o}
+          model: ${OPENAI_MODEL:gpt-5.4-mini}
           temperature: ${OPENAI_TEMPERATURE:0.1}
-          max-tokens: ${OPENAI_MAX_TOKENS:2000}
+          # max-tokens omitted: GPT-5 family rejects it (requires max_completion_tokens
+          # which Spring AI 2.0.0-M4 doesn't emit). Defer the cap to OpenAI defaults.
     
     # MCP Client Configuration - Streamable HTTP Transport
     mcp:
