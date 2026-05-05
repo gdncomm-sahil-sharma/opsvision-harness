@@ -4,6 +4,8 @@ import com.opsvision.harness.model.dto.ChatMessage;
 import com.opsvision.harness.model.dto.ChatResponse;
 import com.opsvision.harness.service.SimpleChatService;
 import com.opsvision.harness.service.DynamicMcpService;
+import com.opsvision.harness.service.McpSessionHealthMonitor;
+import com.opsvision.harness.service.ToolCallbackTestService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +27,12 @@ public class SimpleChatController {
     
     @Autowired
     private DynamicMcpService dynamicMcpService;
+    
+    @Autowired
+    private McpSessionHealthMonitor sessionHealthMonitor;
+    
+    @Autowired
+    private ToolCallbackTestService testService;
 
     /**
      * Main chat endpoint - LLM decides everything dynamically
@@ -122,6 +130,38 @@ public class SimpleChatController {
     }
 
     /**
+     * Get MCP session health status
+     */
+    @GetMapping("/session/health")
+    public ResponseEntity<Map<String, Object>> getSessionHealth() {
+        try {
+            var metrics = sessionHealthMonitor.getHealthMetrics();
+            
+            Map<String, Object> health = new HashMap<>();
+            health.put("healthy", metrics.isHealthy());
+            health.put("last_successful_check", new java.util.Date(metrics.getLastSuccessfulCheck()));
+            health.put("consecutive_failures", metrics.getConsecutiveFailures());
+            health.put("time_since_last_success_ms", metrics.getTimeSinceLastSuccess());
+            
+            if (metrics.isHealthy()) {
+                health.put("status", "UP");
+                health.put("message", "MCP session is healthy");
+                return ResponseEntity.ok(health);
+            } else {
+                health.put("status", "DEGRADED");
+                health.put("message", "MCP session experiencing issues");
+                return ResponseEntity.status(503).body(health);
+            }
+            
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("status", "DOWN");
+            errorResponse.put("error", "Failed to check session health: " + e.getMessage());
+            return ResponseEntity.status(500).body(errorResponse);
+        }
+    }
+
+    /**
      * Refresh tool cache
      */
     @PostMapping("/tools/refresh")
@@ -141,6 +181,26 @@ public class SimpleChatController {
             log.error("Failed to refresh tools", e);
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("error", "Failed to refresh tools: " + e.getMessage());
+            return ResponseEntity.status(500).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Test endpoint to explore ToolCallback methods
+     */
+    @GetMapping("/test-toolcallback")
+    public ResponseEntity<?> testToolCallback() {
+        try {
+            testService.exploreToolCallbackMethods();
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("message", "Tool callback methods explored - check logs");
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Failed to explore tool callback methods", e);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("error", "Failed to explore methods: " + e.getMessage());
             return ResponseEntity.status(500).body(errorResponse);
         }
     }
