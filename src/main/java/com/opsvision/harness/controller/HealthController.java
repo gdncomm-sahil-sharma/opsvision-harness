@@ -1,7 +1,7 @@
 package com.opsvision.harness.controller;
 
 import com.opsvision.harness.service.ai.ChatService;
-import com.opsvision.harness.service.mcp.McpClientService;
+import com.opsvision.harness.service.DynamicMcpService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.ResponseEntity;
@@ -26,7 +26,7 @@ public class HealthController {
     private RedisTemplate<String, Object> redisTemplate;
     
     @Autowired
-    private McpClientService mcpClientService;
+    private DynamicMcpService dynamicMcpService;
     
     @Autowired
     private ChatService chatService;
@@ -67,13 +67,15 @@ public class HealthController {
             overallHealth = false;
         }
         
-        // MCP Client health
+        // MCP Dynamic Service health
         try {
-            boolean mcpHealthy = mcpClientService.isHealthy();
-            health.put("mcp_client", mcpHealthy ? "UP" : "DOWN");
+            var availableTools = dynamicMcpService.discoverAvailableTools();
+            boolean mcpHealthy = !availableTools.isEmpty();
+            health.put("mcp_tools", mcpHealthy ? 
+                "UP - " + availableTools.size() + " tools available" : "DOWN - No tools discovered");
             if (!mcpHealthy) overallHealth = false;
         } catch (Exception e) {
-            health.put("mcp_client", "DOWN - " + e.getMessage());
+            health.put("mcp_tools", "DOWN - " + e.getMessage());
             overallHealth = false;
         }
         

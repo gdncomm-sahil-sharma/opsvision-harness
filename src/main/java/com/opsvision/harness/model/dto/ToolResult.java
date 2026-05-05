@@ -2,7 +2,6 @@ package com.opsvision.harness.model.dto;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.opsvision.harness.model.enums.ToolExecutionStatus;
-import com.opsvision.harness.model.enums.ToolType;
 
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -11,7 +10,6 @@ import java.util.UUID;
 public class ToolResult {
     
     private UUID executionId;
-    private ToolType toolType;
     private String toolName;
     private Map<String, Object> parameters;
     private JsonNode result;
@@ -22,9 +20,8 @@ public class ToolResult {
 
     public ToolResult() {}
 
-    public ToolResult(ToolType toolType, Map<String, Object> parameters) {
-        this.toolType = toolType;
-        this.toolName = toolType.getToolName();
+    public ToolResult(String toolName, Map<String, Object> parameters) {
+        this.toolName = toolName;
         this.parameters = parameters;
         this.status = ToolExecutionStatus.PENDING;
         this.executedAt = LocalDateTime.now();
@@ -39,13 +36,6 @@ public class ToolResult {
         this.executionId = executionId;
     }
 
-    public ToolType getToolType() {
-        return toolType;
-    }
-
-    public void setToolType(ToolType toolType) {
-        this.toolType = toolType;
-    }
 
     public String getToolName() {
         return toolName;
