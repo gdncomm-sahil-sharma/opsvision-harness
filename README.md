@@ -1,301 +1,190 @@
 # OpsVision WMS Investigation Harness
 
-A production-quality Spring Boot application that orchestrates warehouse management system (WMS) investigations by calling MCP (Model Context Protocol) server tools, managing conversation context, and generating AI-powered root cause analysis.
+A Spring Boot application that orchestrates warehouse management system (WMS) investigations by calling MCP (Model Context Protocol) server tools, managing conversation context, and generating AI-powered analysis via OpenAI.
 
-## 🏗️ Architecture Overview
+## Architecture overview
 
-The system follows a layered architecture with clear separation of concerns:
+- **API layer**: REST endpoints for chat-driven investigations.
+- **Chat service**: `SimpleChatService` runs a single LLM-driven turn — extract intent, ask the LLM which discovered tools to call, execute them, then ask the LLM to summarize.
+- **MCP client**: `DynamicMcpService` discovers tools at runtime from the configured MCP server and caches them for 5 minutes.
+- **AI**: Spring AI's OpenAI ChatClient.
+- **Persistence**: PostgreSQL for sessions/conversations/tool executions, Redis for caching.
 
-- **API Layer**: REST endpoints for investigation queries
-- **Agent Layer**: Orchestrates investigation workflow and tool selection  
-- **MCP Client**: Handles external tool communication with retry logic
-- **Context Management**: Session and conversation state management
-- **AI Integration**: Spring AI for generating insights
-- **Persistence Layer**: Postgres for sessions, Redis for caching
+## Tech stack
 
-## 🚀 Features
+- Java 21, Spring Boot 4
+- Spring AI (`2.0.0-M4` milestone) — OpenAI starter + MCP client starter
+- Spring Data JPA + PostgreSQL, Spring Data Redis
+- Flyway for migrations
+- Resilience4j (configured but not yet wired into MCP path)
 
-- **Multi-turn Investigation Sessions**: Maintain conversation context across multiple queries
-- **Intelligent Tool Selection**: Automatically selects relevant MCP tools based on query analysis
-- **AI-Powered Analysis**: Uses Google Gemini (via official Google GenAI SDK) to generate structured root cause analysis
-- **Robust Error Handling**: Circuit breakers, retries, and graceful degradation
-- **Comprehensive Caching**: Redis caching for performance optimization
-- **Production Monitoring**: Health checks, metrics, and structured logging
-
-## 📋 Tech Stack
-
-- **Java 21** with Spring Boot 3
-- **Spring AI** for Google Gemini integration
-- **Spring Data JPA** with PostgreSQL
-- **Spring Data Redis** for caching
-- **WebClient** for MCP server communication  
-- **Resilience4j** for circuit breakers
-- **Flyway** for database migrations
-
-## 🛠️ Prerequisites
+## Prerequisites
 
 - Java 21+
 - Maven 3.8+
-- Docker and Docker Compose (for databases)
-- PostgreSQL 15+
-- Redis 7+
-- Google GenAI API key
+- PostgreSQL 15+ (native or via the included `docker-compose.yml`)
+- Redis 7+ (native or via Docker)
+- An MCP server reachable at `http://localhost:8081/mcp` (the URL is configured in `application.yml` under `spring.ai.mcp.client.streamable-http.connections.opsvision-mcp-server.url`)
+- An OpenAI API key
 
-## 🎯 Quick Start
+## Quick start
 
-### 1. Start Dependencies
+### 1. Start dependencies
+
+Either via Docker:
 
 ```bash
-# Start PostgreSQL and Redis using Docker
 docker-compose up -d postgres redis
 ```
 
-### 2. Set Environment Variables
+Or use a native PostgreSQL/Redis. If native, create the role + database:
 
-```bash
-export DB_USERNAME=opsvision
-export DB_PASSWORD=password
-export GOOGLE_GENAI_API_KEY=your_google_genai_api_key
-export MCP_BASE_URL=http://localhost:8080
+```sql
+CREATE ROLE opsvision WITH LOGIN PASSWORD 'opsvision';
+CREATE DATABASE opsvision OWNER opsvision;
 ```
 
-> 📋 **Need a Google GenAI API key?** See [SETUP_GEMINI.md](SETUP_GEMINI.md) for detailed instructions.
+### 2. Set environment variables
 
-### 3. Run the Application
+```bash
+export OPENAI_API_KEY=sk-...
+export DB_USERNAME=opsvision
+export DB_PASSWORD=opsvision
+```
+
+`OPENAI_API_KEY` has no fallback — the app will refuse to start if it's unset.
+
+### 3. Start the MCP server
+
+The harness is a *client*. Bring up the MCP server it talks to (out of scope for this repo) on `http://localhost:8081/mcp`.
+
+### 4. Run the application
 
 ```bash
 mvn spring-boot:run
 ```
 
-The application will start on http://localhost:8080
+The app starts on `http://localhost:8080`. Flyway runs migrations on startup.
 
-### 4. Verify Health
+### 5. Verify
 
 ```bash
 curl http://localhost:8080/api/v1/health
 ```
 
-## 📖 API Documentation
+You should see `database: UP`, `redis: UP`, and `mcp_tools: UP - N tools available`.
 
-### Start Investigation
+## API
+
+### Chat (main endpoint)
 
 ```http
-POST /api/v1/investigations
+POST /api/chat
 Content-Type: application/json
 
 {
-  "query": "Order 12345 didn't ship",
-  "userId": "user123"
+  "userId": "jim",
+  "message": "What happened with order ORD-12345?"
 }
 ```
 
-**Response:**
+Response:
+
 ```json
 {
-  "sessionId": "uuid",
-  "response": "AI-generated investigation analysis...",
-  "toolResults": [...],
-  "executionTimeMs": 2500,
+  "response": "AI-generated analysis…",
   "success": true,
-  "timestamp": "2026-05-04T17:30:00"
+  "error": null,
+  "toolsUsed": ["get_order_timeline", "get_inventory_history"]
 }
 ```
 
-### Continue Investigation
+### Sample queries
 
 ```http
-POST /api/v1/investigations/{sessionId}/continue?query=What can we do to fix this?&userId=user123
+GET /api/chat/samples
 ```
 
-### Get Session Details
+Returns example prompts for common investigation patterns.
+
+### Discovered tools
 
 ```http
-GET /api/v1/investigations/{sessionId}?userId=user123
+GET /api/chat/tools
+POST /api/chat/tools/refresh
 ```
 
-### Get User Sessions
+`GET /tools` returns the tools `DynamicMcpService` has discovered from the MCP server (cached 5 min). `POST /tools/refresh` invalidates the cache and re-discovers.
+
+### Smoke test (raw OpenAI)
 
 ```http
-GET /api/v1/investigations/user/{userId}
+POST /api/chat/test
+Content-Type: application/json
+
+{ "userId": "jim", "message": "say hello" }
 ```
 
-## 🔧 Configuration
+Bypasses MCP. Useful to confirm the `OPENAI_API_KEY` and ChatClient wiring are healthy without involving the MCP server.
 
-Key configuration options in `application.yml`:
+### Health
+
+```http
+GET /api/v1/health        # full health: db, redis, mcp_tools, ai
+GET /api/v1/health/ready  # readiness
+GET /api/v1/health/live   # liveness
+```
+
+## Configuration
+
+Key entries in `src/main/resources/application.yml`:
 
 ```yaml
 spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/opsvision
+    username: ${DB_USERNAME:opsvision}
+    password: ${DB_PASSWORD:opsvision}
+
   ai:
-    model:
-      chat: google-genai
-    google:
-      genai:
-        api-key: ${GOOGLE_GENAI_API_KEY}
-        chat:
-          options:
-            model: gemini-2.0-flash-exp
-            temperature: 0.1
-            max-output-tokens: 2000
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: ${OPENAI_MODEL:gpt-4.1-nano}
+          temperature: ${OPENAI_TEMPERATURE:0.1}
+          max-tokens: ${OPENAI_MAX_TOKENS:2000}
 
-mcp:
-  base-url: ${MCP_BASE_URL:http://localhost:8080}
-  timeout: 30s
-  retry:
-    max-attempts: 3
-    backoff-multiplier: 2
-
-app:
-  session:
-    max-active-per-user: 5
-    default-ttl: 4h
-  cache:
-    tool-results-ttl: 30m
+    mcp:
+      client:
+        streamable-http:
+          connections:
+            opsvision-mcp-server:
+              url: "http://localhost:8081/mcp"
 ```
 
-## 🧪 Testing
+To point at a different MCP server, edit the `url:` line.
 
-Run the comprehensive test suite:
+## MCP integration
 
-```bash
-# Run all tests
-mvn test
+Tools are discovered dynamically from the MCP server at runtime via `DynamicMcpService.discoverAvailableTools()`. There is no hardcoded tool list — whatever the server advertises through `tools/list` is what the LLM sees. The discovered set is cached for 5 minutes and can be force-refreshed via `POST /api/chat/tools/refresh`.
 
-# Run specific test types
-mvn test -Dtest="**/*UnitTest"
-mvn test -Dtest="**/*IntegrationTest" 
-```
+## Database schema
 
-The test suite includes:
-- Unit tests for service layers
-- Repository integration tests  
-- REST API integration tests
-- End-to-end workflow tests
+Three core tables (created by `V1__Initial_schema.sql`):
 
-## 📊 Monitoring & Health Checks
+- `session` — investigation sessions
+- `conversation` — individual queries/responses within a session
+- `tool_execution` — records of MCP tool invocations
 
-Health check endpoints:
+Plus `session_metadata` for key/value session-level metadata.
 
-- `GET /api/v1/health` - Overall system health
-- `GET /api/v1/health/ready` - Readiness probe
-- `GET /api/v1/health/live` - Liveness probe
+## Tests
 
-The health check verifies:
-- Database connectivity
-- Redis connectivity  
-- MCP server availability
-- AI service health
+Tests were removed during the simplification refactor (see commit `e91d5c0`) and have not been re-added. `mvn test` is currently a no-op.
 
-## 🗄️ Database Schema
+## Notes
 
-The system uses three main entities:
-
-- **Session**: Investigation sessions with metadata
-- **Conversation**: Individual queries and responses within a session
-- **ToolExecution**: Records of MCP tool invocations with results
-
-Database migrations are managed with Flyway.
-
-## 🔄 MCP Integration
-
-The system integrates with MCP servers providing these tools:
-
-- `get_order_timeline` - Retrieve order processing timeline
-- `get_task_history` - Get warehouse task execution history  
-- `get_inventory_history` - Fetch inventory movement data
-- `get_audit_events` - Pull audit trail information
-
-Tools are selected intelligently based on query content analysis.
-
-## 🤖 AI Integration
-
-The system uses **Google Gemini** as the AI backend for generating investigation analysis:
-
-### Features
-- **Custom Spring AI Integration**: Custom ChatModel implementation using Google GenAI SDK
-- **Model Flexibility**: Supports various Gemini models (Flash, Pro, experimental versions)
-- **Structured Prompts**: Specialized prompt engineering for WMS investigation analysis
-- **Conversation Context**: Maintains conversation history for multi-turn investigations
-
-### Configuration
-```yaml
-spring:
-  ai:
-    google:
-      genai:
-        api-key: ${GOOGLE_GENAI_API_KEY}
-        chat:
-          options:
-            model: gemini-2.0-flash-exp  # Configurable model selection
-            temperature: 0.1             # Low temperature for consistent analysis
-            max-output-tokens: 2000      # Adequate for detailed responses
-```
-
-### API Key Setup
-See [SETUP_GEMINI.md](SETUP_GEMINI.md) for detailed Google GenAI API key setup instructions.
-
-## 🚨 Error Handling
-
-The system provides robust error handling:
-
-- **Circuit Breakers**: Fail fast when external services are down
-- **Retry Logic**: Exponential backoff for transient failures
-- **Graceful Degradation**: Continue with available data when tools fail
-- **AI Fallback**: Provides basic responses when AI service is unavailable
-- **Structured Errors**: Consistent error response format
-
-## 🔐 Security Considerations
-
-- Input validation on all endpoints
-- User-based session isolation
-- No sensitive data in logs
-- Configurable rate limiting (via load balancer)
-
-## 📈 Performance Features
-
-- Redis caching for session state and tool results
-- Parallel tool execution where possible
-- Connection pooling for database and HTTP clients
-- Lazy loading for entity relationships
-
-## 🚀 Deployment
-
-The application is containerizable and includes:
-
-- Docker support with multi-stage builds
-- Health checks for container orchestration  
-- Configurable via environment variables
-- Graceful shutdown handling
-
-## 🛠️ Development
-
-### Running Tests
-
-```bash
-mvn test                    # All tests
-mvn test -Dspring.profiles.active=test
-```
-
-### Database Migrations
-
-```bash
-mvn flyway:migrate         # Run migrations
-mvn flyway:info           # Migration status  
-```
-
-### IDE Setup
-
-The project uses standard Spring Boot conventions and works with:
-- IntelliJ IDEA (recommended)
-- Eclipse with Spring Tools
-- VS Code with Spring extensions
-
-## 📝 License
-
-This project is proprietary software for OpsVision WMS investigations.
-
-## 🤝 Contributing
-
-1. Follow the existing code style and patterns
-2. Add tests for new functionality  
-3. Update documentation as needed
-4. Ensure all health checks pass
+- Flyway runs on startup against the configured datasource. If you've manually applied migrations earlier, expect a baseline conflict — drop and recreate the database for a clean run.
+- CORS on `/api/chat` is wide open (`origins = "*"`). Restrict before any non-local deployment.
+- Spring AI is on milestone `2.0.0-M4`. Pin a GA version once available.

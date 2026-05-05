@@ -6,6 +6,7 @@ import com.opsvision.harness.service.SimpleChatService;
 import com.opsvision.harness.service.DynamicMcpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.Map;
 
+// TODO: local-dev wildcard CORS — restrict before any non-local deployment.
 @RestController
 @RequestMapping("/api/chat")
 @CrossOrigin(origins = "*")
@@ -22,9 +24,12 @@ public class SimpleChatController {
 
     @Autowired
     private SimpleChatService chatService;
-    
+
     @Autowired
     private DynamicMcpService dynamicMcpService;
+
+    @Autowired
+    private ChatClient chatClient;
 
     /**
      * Main chat endpoint - LLM decides everything dynamically
@@ -118,6 +123,29 @@ public class SimpleChatController {
             errorResponse.put("error", "Failed to discover tools: " + e.getMessage());
             errorResponse.put("tool_count", 0);
             return ResponseEntity.status(500).body(errorResponse);
+        }
+    }
+
+    /**
+     * Raw OpenAI smoke-test — bypasses MCP and SimpleChatService.
+     */
+    @PostMapping("/test")
+    public ResponseEntity<Map<String, Object>> test(@RequestBody ChatMessage message) {
+        try {
+            String response = chatClient.prompt()
+                .user(message.getMessage())
+                .call()
+                .content();
+            Map<String, Object> body = new HashMap<>();
+            body.put("response", response);
+            body.put("status", "success");
+            return ResponseEntity.ok(body);
+        } catch (Exception e) {
+            log.error("OpenAI smoke-test failed", e);
+            Map<String, Object> body = new HashMap<>();
+            body.put("error", e.getMessage());
+            body.put("status", "error");
+            return ResponseEntity.status(500).body(body);
         }
     }
 
