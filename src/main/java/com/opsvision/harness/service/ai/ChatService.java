@@ -51,10 +51,10 @@ public class ChatService {
             if (mcpEnabled) {
                 if (syncMcpToolCallbackProvider != null) {
                     log.info("Using Sync MCP tool callbacks for investigation");
-                    chatClientBuilder.defaultTools(syncMcpToolCallbackProvider.getToolCallbacks());
+                    chatClientBuilder.defaultToolCallbacks(syncMcpToolCallbackProvider);
                 } else if (asyncMcpToolCallbackProvider != null) {
                     log.info("Using Async MCP tool callbacks for investigation");
-                    chatClientBuilder.defaultTools(asyncMcpToolCallbackProvider.getToolCallbacks());
+                    chatClientBuilder.defaultToolCallbacks(asyncMcpToolCallbackProvider);
                 } else {
                     log.warn("MCP is enabled but no tool callback provider is available");
                 }
@@ -84,8 +84,26 @@ public class ChatService {
         try {
             String prompt = promptBuilder.buildContinuationPrompt(context, followUpQuery);
             
-            // Use default model options - provider-agnostic approach
-            String response = chatClient.prompt()
+            log.debug("Built follow-up prompt with length: {} characters", prompt.length());
+            
+            // Create a ChatClient with MCP tools if available
+            ChatClient.Builder chatClientBuilder = ChatClient.builder(chatModel);
+            
+            // Add MCP tool callbacks if MCP is enabled and tool provider is available
+            if (mcpEnabled) {
+                if (syncMcpToolCallbackProvider != null) {
+                    log.info("Using Sync MCP tool callbacks for follow-up");
+                    chatClientBuilder.defaultToolCallbacks(syncMcpToolCallbackProvider);
+                } else if (asyncMcpToolCallbackProvider != null) {
+                    log.info("Using Async MCP tool callbacks for follow-up");
+                    chatClientBuilder.defaultToolCallbacks(asyncMcpToolCallbackProvider);
+                } else {
+                    log.warn("MCP is enabled but no tool callback provider is available for follow-up");
+                }
+            }
+            
+            String response = chatClientBuilder.build()
+                .prompt()
                 .user(prompt)
                 .call()
                 .content();
@@ -108,8 +126,26 @@ public class ChatService {
         try {
             String prompt = promptBuilder.buildSummaryPrompt(context);
             
-            // Use default model options - provider-agnostic approach
-            String response = chatClient.prompt()
+            log.debug("Built summary prompt with length: {} characters", prompt.length());
+            
+            // Create a ChatClient with MCP tools if available
+            ChatClient.Builder chatClientBuilder = ChatClient.builder(chatModel);
+            
+            // Add MCP tool callbacks if MCP is enabled and tool provider is available
+            if (mcpEnabled) {
+                if (syncMcpToolCallbackProvider != null) {
+                    log.info("Using Sync MCP tool callbacks for summary");
+                    chatClientBuilder.defaultToolCallbacks(syncMcpToolCallbackProvider);
+                } else if (asyncMcpToolCallbackProvider != null) {
+                    log.info("Using Async MCP tool callbacks for summary");
+                    chatClientBuilder.defaultToolCallbacks(asyncMcpToolCallbackProvider);
+                } else {
+                    log.warn("MCP is enabled but no tool callback provider is available for summary");
+                }
+            }
+            
+            String response = chatClientBuilder.build()
+                .prompt()
                 .user(prompt)
                 .call()
                 .content();
