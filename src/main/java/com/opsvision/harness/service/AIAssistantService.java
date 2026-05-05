@@ -1,388 +1,329 @@
 package com.opsvision.harness.service;
 
-import com.opsvision.harness.service.ai.ChatService;
-import com.opsvision.harness.service.DynamicMcpService;
-import com.opsvision.harness.model.dto.SessionContext;
-import com.opsvision.harness.model.dto.response.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
-import java.util.stream.Collectors;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.opsvision.harness.model.dto.response.ChatResponseData;
+import com.opsvision.harness.model.dto.response.TextResponse;
+import com.opsvision.harness.model.entity.Conversation;
+import com.opsvision.harness.model.entity.Session;
+import com.opsvision.harness.model.entity.ToolExecution;
+import com.opsvision.harness.model.enums.ToolExecutionStatus;
+import com.opsvision.harness.repository.ConversationRepository;
+import com.opsvision.harness.repository.ToolExecutionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ToolContext;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.Supplier;
+
 /**
- * AI Assistant Service - Following Medium Article Pattern
- * 
- * This service integrates ChatClient with MCP tool callbacks following the 
- * architectural pattern from the Medium article. Adapted to work with our
- * existing OpenAI integration and MCP client setup.
+ * Single chat service for /api/chat. Drives Spring AI's tool-calling loop
+ * against MCP tools, attaches per-session memory, persists a Conversation
+ * row plus a ToolExecution row per tool call, caches tool results in Redis,
+ * and shapes the final assistant message into ChatResponseData via
+ * {@code chatClient.prompt(...).call().entity(ChatResponseData.class)} —
+ * which lets the LLM call tools as needed and emit a JSON object matching
+ * the response schema as its final message.
  */
 @Service
 public class AIAssistantService {
-    
-    private static final Logger logger = LoggerFactory.getLogger(AIAssistantService.class);
-    
-    private final ChatService chatService;
-    private final DynamicMcpService dynamicMcpService;
-    private final ObjectMapper objectMapper;
-    
+
+    private static final Logger log = LoggerFactory.getLogger(AIAssistantService.class);
+
+    private static final ThreadLocal<List<String>> INVOKED_TOOLS =
+            ThreadLocal.withInitial(ArrayList::new);
+    private static final ThreadLocal<UUID> CURRENT_CONVERSATION_ID = new ThreadLocal<>();
+
+    private static final String TOOL_CACHE_PREFIX = "tool-result:";
+
     @Autowired
-    private ChatClient chatClient;
-    
-    public AIAssistantService(ChatService chatService, DynamicMcpService dynamicMcpService, ObjectMapper objectMapper) {
-        this.chatService = chatService;
-        this.dynamicMcpService = dynamicMcpService;
-        this.objectMapper = objectMapper;
-    }
-    
-    /**
-     * Enhanced chat method that follows Medium article pattern
-     * Integrates AI model with MCP tool capabilities
-     */
-    public String chat(String userMessage, String model) {
-        logger.info("Processing chat request with model: {}", model);
-        
-        // Dynamically discover available tools
-        String availableToolsDescription = dynamicMcpService.getToolDescriptionsForLLM();
-        
-        String systemPrompt = String.format("""
-            You are a helpful AI assistant with access to warehouse management system tools.
-            Use the available tools to provide accurate and helpful responses about warehouse operations.
-            Always explain what data you're accessing and why.
-            
-            %s
-            
-            When a user asks about warehouse operations, use the appropriate tools to gather comprehensive information
-            and provide a detailed analysis of the situation.
-            """, availableToolsDescription);
-        
+    private ChatModel chatModel;
+
+    @Autowired(required = false)
+    private SyncMcpToolCallbackProvider mcpToolProvider;
+
+    @Autowired
+    private ChatMemory chatMemory;
+
+    @Autowired
+    private SessionService sessionService;
+
+    @Autowired
+    private ConversationRepository conversationRepository;
+
+    @Autowired
+    private ToolExecutionRepository toolExecutionRepository;
+
+    @Autowired(required = false)
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    @Qualifier("toolResultsTtl")
+    private Duration toolResultsTtl;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private volatile String llmPrompt;
+
+    public ChatResponseData generateStructuredResponse(String userId, String userMessage) {
+        log.info("Processing structured chat for user '{}': {}", userId, userMessage);
+        INVOKED_TOOLS.get().clear();
+        Conversation conversation = null;
+
         try {
-            // Use ChatClient with MCP tools directly - as per Medium article pattern
-            logger.info("🔥 Using MCP-enabled ChatClient for request: {}", userMessage);
-            
-            return chatClient.prompt()
-                .system(systemPrompt)
-                .user(userMessage)
-                .call()
-                .content();
-            
+            Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
+            conversation = persistInitialConversation(session, userMessage);
+            CURRENT_CONVERSATION_ID.set(conversation.getId());
+
+            ToolCallback[] callbacks = wrappedCallbacks();
+            log.info("ChatClient prompt: session={} conversation={} tools={}",
+                    session.getId(), conversation.getId(), callbacks.length);
+
+            MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory)
+                    .conversationId(session.getId().toString())
+                    .build();
+
+            ChatClient client = ChatClient.builder(chatModel)
+                    .defaultSystem(getLLMPrompt())
+                    .defaultAdvisors(memoryAdvisor)
+                    .build();
+
+            ChatResponseData responseData = client.prompt()
+                    .user(userMessage)
+                    .toolCallbacks(callbacks)
+                    .call()
+                    .entity(ChatResponseData.class);
+
+            String summary = (responseData != null && responseData.getTextResponse() != null)
+                    ? responseData.getTextResponse().getSummary()
+                    : "(no summary)";
+            conversation.setResponse(summary);
+            conversationRepository.save(conversation);
+
+            log.info("Chat completed; conversation={} tools={}",
+                    conversation.getId(), INVOKED_TOOLS.get());
+            return responseData;
+
         } catch (Exception e) {
-            logger.error("Error processing chat request: {}", e.getMessage());
-            return "Error: " + e.getMessage();
-        }
-    }
-    
-    /**
-     * Generate structured chat response with text, timelines, and tables
-     */
-    public ChatResponseData generateStructuredResponse(String userMessage, String model) {
-        logger.info("Processing structured chat request with model: {}", model);
-        
-        // Dynamically discover available tools
-        String availableToolsDescription = dynamicMcpService.getToolDescriptionsForLLM();
-        
-        String structuredPrompt = String.format("""
-            You are a helpful AI assistant with access to warehouse management system tools.
-            Generate a comprehensive response in JSON format that includes text summary, timeline data, and tabular data when relevant.
-            
-            %s
-            
-            IMPORTANT: Return a valid JSON response with the following structure:
-            {
-              "textResponse": {
-                "summary": "A comprehensive summary of the situation or response to the query",
-                "bullets": ["Bullet point 1", "Bullet point 2", "Bullet point 3"]
-              },
-              "timelines": {
-                "title": "Relevant Timeline Title",
-                "data": [
-                  {
-                    "date": 1714521600000,
-                    "title": "Phase Name",
-                    "description": "Description of this phase",
-                    "status": "COMPLETED"
-                  }
-                ]
-              },
-              "table": {
-                "title": "Relevant Table Title",
-                "headers": ["Item Name", "Quantity", "Price", "Status"],
-                "data": [
-                  ["Product A", 2, 500, "COMPLETED"],
-                  ["Product B", 1, 1200, "PENDING"],
-                  ["Product C", 3, 800, "FAILED"]
-                ]
-              }
-            }
-            
-            IMPORTANT GUIDELINES:
-            - textResponse is ALWAYS required
-            - timelines and table are OPTIONAL - only include them if they add meaningful value to the response
-            - If the user query doesn't involve processes, workflows, or time-based data, set "timelines": null
-            - If the user query doesn't involve structured data that would benefit from tabular presentation, set "table": null
-            - Status values for timeline items must be one of: COMPLETED, PENDING, FAILED, NOT_STARTED, CANCELLED
-            - Date values should be Unix timestamps in milliseconds
-            - Table data should contain mixed types (strings, numbers) as appropriate for each column
-            
-            Examples of when to include timelines: order processing status, project phases, workflow steps, historical events
-            Examples of when to include tables: order details, inventory lists, comparison data, status breakdowns
-            Examples of when to omit: general questions, explanations, simple status checks without detailed data
-            
-            User Query: %s
-            """, availableToolsDescription, userMessage);
-        
-        try {
-            logger.info("🔥 Using MCP-enabled ChatClient for structured request: {}", userMessage);
-            
-            String jsonResponse = chatClient.prompt()
-                .system("You are a warehouse management AI assistant. Always respond with valid JSON in the exact format specified.")
-                .user(structuredPrompt)
-                .call()
-                .content();
-                
-            logger.debug("Received JSON response: {}", jsonResponse);
-            
-            return parseStructuredResponse(jsonResponse, userMessage);
-            
-        } catch (Exception e) {
-            logger.error("Error processing structured chat request: {}", e.getMessage());
-            return createFallbackResponse(userMessage, e);
-        }
-    }
-    
-    /**
-     * Parse JSON response into structured ChatResponseData
-     */
-    private ChatResponseData parseStructuredResponse(String jsonResponse, String userMessage) {
-        try {
-            // Clean the JSON response in case LLM adds extra text
-            String cleanJson = extractJsonFromResponse(jsonResponse);
-            
-            JsonNode rootNode = objectMapper.readTree(cleanJson);
-            
-            // Parse text response
-            TextResponse textResponse = parseTextResponse(rootNode.get("textResponse"));
-            
-            // Parse timeline
-            Timeline timeline = parseTimeline(rootNode.get("timelines"));
-            
-            // Parse table
-            Table table = parseTable(rootNode.get("table"));
-            
-            return new ChatResponseData(textResponse, timeline, table);
-            
-        } catch (Exception e) {
-            logger.error("Failed to parse JSON response: {}", e.getMessage());
-            logger.debug("Original response: {}", jsonResponse);
-            return createFallbackResponse(userMessage, e);
-        }
-    }
-    
-    /**
-     * Extract JSON from LLM response (removes any surrounding text)
-     */
-    private String extractJsonFromResponse(String response) {
-        // Find the first { and last } to extract JSON
-        int startIndex = response.indexOf('{');
-        int endIndex = response.lastIndexOf('}');
-        
-        if (startIndex != -1 && endIndex != -1 && startIndex < endIndex) {
-            return response.substring(startIndex, endIndex + 1);
-        }
-        
-        return response; // Return as-is if no clear JSON boundaries found
-    }
-    
-    /**
-     * Parse text response section
-     */
-    private TextResponse parseTextResponse(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return new TextResponse("Response generated successfully", Arrays.asList("Processing completed"));
-        }
-        
-        String summary = node.has("summary") ? node.get("summary").asText() : "Response generated";
-        List<String> bullets = new ArrayList<>();
-        
-        if (node.has("bullets") && node.get("bullets").isArray()) {
-            for (JsonNode bullet : node.get("bullets")) {
-                bullets.add(bullet.asText());
-            }
-        } else {
-            bullets.add("Processing completed successfully");
-        }
-        
-        return new TextResponse(summary, bullets);
-    }
-    
-    /**
-     * Parse timeline section
-     */
-    private Timeline parseTimeline(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null; // Return null when LLM explicitly sets it as null
-        }
-        
-        String title = node.has("title") ? node.get("title").asText() : "Process Timeline";
-        List<TimelineItem> timelineItems = new ArrayList<>();
-        
-        if (node.has("data") && node.get("data").isArray()) {
-            for (JsonNode item : node.get("data")) {
-                TimelineItem timelineItem = parseTimelineItem(item);
-                if (timelineItem != null) {
-                    timelineItems.add(timelineItem);
-                }
-            }
-        }
-        
-        if (timelineItems.isEmpty()) {
-            return null; // Return null if no meaningful timeline data
-        }
-        
-        return new Timeline(title, timelineItems);
-    }
-    
-    /**
-     * Parse individual timeline item
-     */
-    private TimelineItem parseTimelineItem(JsonNode item) {
-        try {
-            long date = item.has("date") ? item.get("date").asLong() : System.currentTimeMillis();
-            String title = item.has("title") ? item.get("title").asText() : "Process Step";
-            String description = item.has("description") ? item.get("description").asText() : "Step completed";
-            
-            TimelineStatus status = TimelineStatus.COMPLETED;
-            if (item.has("status")) {
+            log.error("Error processing structured chat", e);
+            if (conversation != null) {
                 try {
-                    status = TimelineStatus.valueOf(item.get("status").asText().toUpperCase());
-                } catch (IllegalArgumentException e) {
-                    logger.warn("Invalid timeline status: {}, using COMPLETED", item.get("status").asText());
+                    conversation.setResponse("ERROR: " + e.getMessage());
+                    conversationRepository.save(conversation);
+                } catch (Exception persistError) {
+                    log.warn("Failed to persist error response: {}", persistError.getMessage());
                 }
             }
-            
-            return new TimelineItem(date, title, description, status);
+            return createFallbackResponse(userMessage, e);
+        } finally {
+            INVOKED_TOOLS.remove();
+            CURRENT_CONVERSATION_ID.remove();
+        }
+    }
+
+    public List<String> lastInvokedTools() {
+        return Collections.unmodifiableList(INVOKED_TOOLS.get());
+    }
+
+    private ChatResponseData createFallbackResponse(String userMessage, Exception error) {
+        TextResponse text = new TextResponse(
+                "I encountered an error processing your request: " + error.getMessage(),
+                List.of(
+                        "The error has been logged for investigation.",
+                        "Please try again or rephrase the question."
+                )
+        );
+        return new ChatResponseData(text, null, null);
+    }
+
+    private Conversation persistInitialConversation(Session session, String message) {
+        int seq = conversationRepository.findMaxSequenceNumberForSession(session.getId())
+                .orElse(0) + 1;
+        Conversation conv = new Conversation(session, seq, message);
+        return conversationRepository.save(conv);
+    }
+
+    private String getLLMPrompt() {
+        if (llmPrompt == null) {
+            try {
+                ClassPathResource resource = new ClassPathResource("llm-prompt.txt");
+                llmPrompt = resource.getContentAsString(StandardCharsets.UTF_8);
+                log.info("LLM system prompt loaded ({} chars)", llmPrompt.length());
+            } catch (IOException e) {
+                log.error("Failed to load llm-prompt.txt", e);
+                llmPrompt = "You are a helpful warehouse operations assistant.";
+            }
+        }
+        return llmPrompt;
+    }
+
+    private ToolCallback[] wrappedCallbacks() {
+        if (mcpToolProvider == null) {
+            return new ToolCallback[0];
+        }
+        ToolCallback[] raw = mcpToolProvider.getToolCallbacks();
+        if (raw == null || raw.length == 0) {
+            return new ToolCallback[0];
+        }
+        ToolCallback[] wrapped = new ToolCallback[raw.length];
+        for (int i = 0; i < raw.length; i++) {
+            wrapped[i] = new RecordingToolCallback(raw[i]);
+        }
+        return wrapped;
+    }
+
+    private JsonNode parseJsonOrNull(String json) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(json);
         } catch (Exception e) {
-            logger.error("Error parsing timeline item: {}", e.getMessage());
+            return objectMapper.getNodeFactory().textNode(json);
+        }
+    }
+
+    private String cacheKey(String toolName, String args) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            md.update(args == null ? new byte[0] : args.getBytes(StandardCharsets.UTF_8));
+            return TOOL_CACHE_PREFIX + toolName + ":" + HexFormat.of().formatHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            return TOOL_CACHE_PREFIX + toolName + ":" + (args == null ? 0 : args.hashCode());
+        }
+    }
+
+    private String lookupCache(String key) {
+        if (redisTemplate == null) {
+            return null;
+        }
+        try {
+            return redisTemplate.opsForValue().get(key);
+        } catch (Exception e) {
+            log.debug("Cache lookup failed for key {}: {}", key, e.getMessage());
             return null;
         }
     }
-    
-    /**
-     * Parse table section
-     */
-    private Table parseTable(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null; // Return null when LLM explicitly sets it as null
+
+    private void storeCache(String key, String value) {
+        if (redisTemplate == null || value == null || value.isEmpty()) {
+            return;
         }
-        
-        String title = node.has("title") ? node.get("title").asText() : "Data Summary";
-        List<String> headers = new ArrayList<>();
-        List<List<Object>> data = new ArrayList<>();
-        
-        // Parse headers
-        if (node.has("headers") && node.get("headers").isArray()) {
-            for (JsonNode header : node.get("headers")) {
-                headers.add(header.asText());
-            }
-        }
-        
-        // Parse data rows
-        if (node.has("data") && node.get("data").isArray()) {
-            for (JsonNode row : node.get("data")) {
-                if (row.isArray()) {
-                    List<Object> rowData = new ArrayList<>();
-                    for (JsonNode cell : row) {
-                        // Preserve the original data types (numbers, strings, booleans)
-                        if (cell.isNumber()) {
-                            if (cell.isInt()) {
-                                rowData.add(cell.asInt());
-                            } else if (cell.isLong()) {
-                                rowData.add(cell.asLong());
-                            } else {
-                                rowData.add(cell.asDouble());
-                            }
-                        } else if (cell.isBoolean()) {
-                            rowData.add(cell.asBoolean());
-                        } else {
-                            rowData.add(cell.asText());
-                        }
-                    }
-                    data.add(rowData);
-                }
-            }
-        }
-        
-        if (headers.isEmpty() || data.isEmpty()) {
-            return null; // Return null if no meaningful table data
-        }
-        
-        return new Table(title, headers, data);
-    }
-    
-    /**
-     * Create fallback response when JSON parsing fails
-     */
-    private ChatResponseData createFallbackResponse(String userMessage, Exception error) {
-        logger.warn("Creating fallback response due to error: {}", error.getMessage());
-        
-        // Create simple text response
-        TextResponse textResponse = new TextResponse(
-            "I've processed your request: " + userMessage,
-            Arrays.asList(
-                "Response generated successfully",
-                "Using fallback format due to processing constraints",
-                "Please try again if you need more detailed information"
-            )
-        );
-        
-        // For fallback responses, don't include timelines/tables since we don't have meaningful structured data
-        return new ChatResponseData(textResponse, null, null);
-    }
-    
-    
-    /**
-     * Get investigation summary using MCP tools
-     * This demonstrates the enhanced capabilities possible with MCP integration
-     */
-    public String getInvestigationSummary(String orderId) {
-        logger.info("Generating investigation summary for order: {}", orderId);
-        
         try {
-            // Use dynamic MCP service to gather comprehensive data
-            // Get all available tools and execute them for investigation data
-            var availableTools = dynamicMcpService.discoverAvailableTools();
-            var toolNames = new java.util.ArrayList<>(availableTools.keySet());
-            var toolResults = dynamicMcpService.executeSelectedTools(toolNames, orderId);
-            String mcpData = toolResults.stream()
-                .map(result -> String.format("=== %s ===\n%s", result.getToolName(), result.getResult()))
-                .collect(Collectors.joining("\n\n"));
-            
-            String investigationPrompt = """
-                Analyze this warehouse investigation data and provide a comprehensive summary:
-                
-                Data: %s
-                
-                Please provide:
-                1. Current status overview
-                2. Key issues identified
-                3. Root cause analysis
-                4. Recommended actions
-                
-                Format the response in a clear, structured manner suitable for operations teams.
-                """.formatted(mcpData);
-            
-            SessionContext context = new SessionContext();
-            return chatService.generateInvestigation(context, investigationPrompt);
-            
+            redisTemplate.opsForValue().set(key, value, toolResultsTtl);
         } catch (Exception e) {
-            logger.error("Error generating investigation summary: {}", e.getMessage());
-            return "Error generating investigation summary: " + e.getMessage();
+            log.debug("Cache store failed for key {}: {}", key, e.getMessage());
+        }
+    }
+
+    private final class RecordingToolCallback implements ToolCallback {
+
+        private final ToolCallback delegate;
+
+        RecordingToolCallback(ToolCallback delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public ToolDefinition getToolDefinition() {
+            return delegate.getToolDefinition();
+        }
+
+        @Override
+        public String call(String toolInput) {
+            return record(toolInput, () -> delegate.call(toolInput));
+        }
+
+        @Override
+        public String call(String toolInput, ToolContext toolContext) {
+            return record(toolInput, () -> delegate.call(toolInput, toolContext));
+        }
+
+        private String record(String toolInput, Supplier<String> invoke) {
+            String name = safeName();
+            INVOKED_TOOLS.get().add(name);
+            UUID convId = CURRENT_CONVERSATION_ID.get();
+
+            String cacheKey = cacheKey(name, toolInput);
+            String cached = lookupCache(cacheKey);
+            if (cached != null) {
+                log.info("MCP tool cache HIT: {} key={}", name, cacheKey);
+                persistToolExecution(convId, name, toolInput, cached, 0,
+                        ToolExecutionStatus.SUCCESS, "cache-hit");
+                return cached;
+            }
+
+            long start = System.currentTimeMillis();
+            try {
+                String result = invoke.get();
+                long elapsed = System.currentTimeMillis() - start;
+                log.info("MCP tool invoked: {} latency_ms={} input={}",
+                        name, elapsed, toolInput);
+                storeCache(cacheKey, result);
+                persistToolExecution(convId, name, toolInput, result, elapsed,
+                        ToolExecutionStatus.SUCCESS, null);
+                return result;
+            } catch (RuntimeException e) {
+                long elapsed = System.currentTimeMillis() - start;
+                log.warn("MCP tool failed: {} latency_ms={} error={}",
+                        name, elapsed, e.getMessage());
+                persistToolExecution(convId, name, toolInput, null, elapsed,
+                        ToolExecutionStatus.FAILED, e.getMessage());
+                throw e;
+            }
+        }
+
+        private void persistToolExecution(UUID convId, String name, String input,
+                                          String result, long elapsedMs,
+                                          ToolExecutionStatus status, String error) {
+            if (convId == null) {
+                return;
+            }
+            try {
+                Conversation convRef = conversationRepository.getReferenceById(convId);
+                ToolExecution te = new ToolExecution();
+                te.setConversation(convRef);
+                te.setToolName(name);
+                te.setParameters(parseJsonOrNull(input));
+                te.setResult(parseJsonOrNull(result));
+                te.setExecutionTimeMs((int) elapsedMs);
+                te.setStatus(status);
+                te.setErrorMessage(error);
+                toolExecutionRepository.save(te);
+            } catch (Exception e) {
+                log.warn("Failed to persist ToolExecution for {}: {}", name, e.getMessage());
+            }
+        }
+
+        private String safeName() {
+            try {
+                ToolDefinition def = delegate.getToolDefinition();
+                return def != null ? def.name() : "unknown";
+            } catch (Exception e) {
+                return "unknown";
+            }
         }
     }
 }

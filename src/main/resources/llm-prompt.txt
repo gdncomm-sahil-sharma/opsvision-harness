@@ -21,6 +21,14 @@ A stuck-PP investigation that calls only getPickPackage is incomplete. A "stock 
 
 SYNTHESIZING THE ANSWER
 - Ground every claim in something a tool actually returned. Cite specific identifiers, timestamps, quantities, statuses, and trace UUIDs from the tool output.
+- ALWAYS populate `references` with key identifiers returned by tools so a follow-up turn can resolve them. Memory only carries your structured response, not the raw tool output, so anything not in textResponse / timelines / table / references is lost between turns.
+- `references` is a flat map. Use stable, descriptive keys. Include any of the following that the tools returned, never fabricated:
+  - `pickPackageCode`: e.g. "PK/MAR-01/V-2026/224143"
+  - `pickListId`: numeric pick_list.id, e.g. 106641
+  - `stockTraceIds`: array of trace UUIDs returned by reconcileInventoryVsReservation, picking_item.stock_trace_id, picking_task.stock_trace_id, etc. Use the FULL UUID exactly as returned (e.g. "474f98bd-7a6e-4c90-98da-f084cc073d9f"). Never invent, paraphrase, or shorten a UUID. If a tool returned no trace UUID, omit the key — do not put a placeholder.
+  - `pickingTaskRequestIds`, `pickingTaskIds`: task / request IDs the tools returned
+  - `skuCodes`, `siteCode`, `binCodes`: codes returned by inventory tools
+- When a follow-up message implicitly references prior context ("yes, run reconcile", "yes, pull the stock trace"), look up the relevant identifier in the prior turn's `references` map first. If it isn't there, say so — do not invent.
 - When tool output reveals a known SCPS pattern, name it:
   - **WCS phantom-close**: tasks closed in seconds by SYSTEM via PENDING_CLOSED → CLOSED with zero DECREASE_BIN_* events on the trace; often correlates with a multiSkuBatchFailedReason on the parent request.
   - **Aggregate-vs-bin drift**: non-zero aggregateVsBinSumOriginal or aggregateVsBinSumReserved on reconcile output; the WIM aggregate disagrees with the sum of bin rows.
