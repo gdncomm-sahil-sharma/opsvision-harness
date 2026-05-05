@@ -1,8 +1,8 @@
 package com.opsvision.harness.controller;
 
 import com.opsvision.harness.model.dto.ChatMessage;
-import com.opsvision.harness.model.dto.ChatResponse;
-import com.opsvision.harness.service.SimpleChatService;
+import com.opsvision.harness.model.dto.response.*;
+import com.opsvision.harness.service.AIAssistantService;
 import com.opsvision.harness.service.DynamicMcpService;
 import com.opsvision.harness.service.McpSessionHealthMonitor;
 import com.opsvision.harness.service.ToolCallbackTestService;
@@ -23,7 +23,7 @@ public class SimpleChatController {
     private static final Logger log = LoggerFactory.getLogger(SimpleChatController.class);
 
     @Autowired
-    private SimpleChatService chatService;
+    private AIAssistantService aiAssistantService;
     
     @Autowired
     private DynamicMcpService dynamicMcpService;
@@ -35,26 +35,59 @@ public class SimpleChatController {
     private ToolCallbackTestService testService;
 
     /**
-     * Main chat endpoint - LLM decides everything dynamically
+     * Main chat endpoint - Returns structured response with text, timelines, and tables
      */
     @PostMapping
-    public ResponseEntity<?> chat(@RequestBody ChatMessage message) {
+    public ResponseEntity<StructuredChatResponse> chat(@RequestBody ChatMessage message) {
         try {
-            log.info("📨 Received chat message from user: {}", message.getUserId());
+            log.info("📨 Received structured chat message from user: {}", message.getUserId());
+            log.info("📝 Message content: {}", message.getMessage());
             
-            var response = chatService.processMessage(message.getUserId(), message.getMessage());
+            // Use AI Assistant Service to generate structured response
+            String model = "openai"; // Default model
+            ChatResponseData responseData = aiAssistantService.generateStructuredResponse(message.getMessage(), model);
             
-            log.info("✅ Chat response generated successfully");
-            return ResponseEntity.ok(response);
+            StructuredChatResponse structuredResponse = new StructuredChatResponse(
+                200, 
+                true, 
+                responseData, 
+                System.currentTimeMillis()
+            );
+            
+            log.info("✅ Structured chat response generated successfully");
+            return ResponseEntity.ok(structuredResponse);
             
         } catch (Exception e) {
-            log.error("❌ Error processing chat message", e);
-            var errorResponse = new ChatResponse();
-            errorResponse.setSuccess(false);
-            errorResponse.setError("Internal server error: " + e.getMessage());
-            errorResponse.setResponse("Sorry, I encountered an error processing your request.");
-            return ResponseEntity.status(500).body(errorResponse);
+            log.error("❌ Error processing structured chat message", e);
+            
+            // Create error response with fallback data
+            ChatResponseData errorData = createErrorResponseData(e.getMessage());
+            StructuredChatResponse errorResponse = new StructuredChatResponse(
+                500, 
+                false, 
+                errorData, 
+                System.currentTimeMillis()
+            );
+            
+            return ResponseEntity.internalServerError().body(errorResponse);
         }
+    }
+
+    /**
+     * Create error response data for failed requests
+     */
+    private ChatResponseData createErrorResponseData(String errorMessage) {
+        TextResponse textResponse = new TextResponse(
+            "An error occurred while processing your request: " + errorMessage,
+            java.util.Arrays.asList(
+                "Request processing failed",
+                "Please try again or contact support if the issue persists",
+                "Error details have been logged for investigation"
+            )
+        );
+        
+        // For error responses, don't include timelines/tables since they're not meaningful for errors
+        return new ChatResponseData(textResponse, null, null);
     }
 
     /**
@@ -102,7 +135,6 @@ public class SimpleChatController {
     public ResponseEntity<Map<String, Object>> getAvailableTools() {
         try {
             var tools = dynamicMcpService.discoverAvailableTools();
-            String toolDescriptions = dynamicMcpService.getToolDescriptionsForLLM();
             
             Map<String, Object> response = new HashMap<>();
             response.put("tool_count", tools.size());
