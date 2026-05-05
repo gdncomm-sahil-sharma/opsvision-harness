@@ -1,5 +1,5 @@
 server:
-  port: 8084
+  port: 8080
 
 spring:
   application:
@@ -8,7 +8,7 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/opsvision
     username: ${DB_USERNAME:opsvision}
-    password: ${DB_PASSWORD:password}
+    password: ${DB_PASSWORD:opsvision}
     driver-class-name: org.postgresql.Driver
   
   jpa:
@@ -37,30 +37,28 @@ spring:
           time-between-eviction-runs: 30s
       
   ai:
-    model:
-      chat: google-genai
-    google:
-      genai:
-        api-key: ${GOOGLE_GENAI_API_KEY}
-        chat:
-          options:
-            model: gemini-flash-latest
-            temperature: 0.1
-            max-output-tokens: 2000
+    # OpenAI Configuration
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: ${OPENAI_MODEL:gpt-4.1-nano}
+          temperature: ${OPENAI_TEMPERATURE:0.1}
+          max-tokens: ${OPENAI_MAX_TOKENS:2000}
+    
+    # MCP Client Configuration - Streamable HTTP Transport
+    mcp:
+      enabled: true
+      client:
+        enabled: true
+        type: SYNC
+        request-timeout: 30s
+        streamable-http:
+          connections:
+            opsvision-mcp-server:
+              url: "http://localhost:8081/mcp"
 
-  jackson:
-    serialization:
-      write-dates-as-timestamps: false
-    deserialization:
-      fail-on-unknown-properties: false
 
-mcp:
-  base-url: ${MCP_BASE_URL:http://localhost:8080}
-  timeout: 30s
-  retry:
-    max-attempts: 3
-    backoff-multiplier: 2
-    initial-delay: 1s
 
 app:
   session:

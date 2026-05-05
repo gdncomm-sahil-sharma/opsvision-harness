@@ -4,9 +4,12 @@ import com.opsvision.harness.model.dto.SessionContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
-import com.opsvision.harness.config.GeminiChatModel;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.ai.mcp.AsyncMcpToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -18,101 +21,128 @@ public class ChatService {
     private ChatClient chatClient;
     
     @Autowired
+    private ChatModel chatModel;
+    
+    @Autowired
     private PromptBuilder promptBuilder;
+    
+    @Autowired(required = false)
+    private SyncMcpToolCallbackProvider syncMcpToolCallbackProvider;
 
+    @Autowired(required = false)
+    private AsyncMcpToolCallbackProvider asyncMcpToolCallbackProvider;
+
+    @Value("${spring.ai.mcp.enabled:false}")
+    private boolean mcpEnabled;
+    
     public String generateInvestigation(SessionContext context, String currentQuery) {
-        log.info("Generating AI investigation response for session: {}", context.getSessionId());
+        log.info("Generating AI investigation response for session: {} using OpenAI", 
+                 context.getSessionId());
         
         try {
             String prompt = promptBuilder.buildInvestigationPrompt(context, currentQuery);
             
             log.debug("Built investigation prompt with length: {} characters", prompt.length());
             
-            String response = chatClient.prompt()
+            // Create a ChatClient with MCP tools if available
+            ChatClient.Builder chatClientBuilder = ChatClient.builder(chatModel);
+            
+            // Add MCP tool callbacks if MCP is enabled and tool provider is available
+            if (mcpEnabled) {
+                if (syncMcpToolCallbackProvider != null) {
+                    log.info("Using Sync MCP tool callbacks for investigation");
+                    chatClientBuilder.defaultTools(syncMcpToolCallbackProvider.getToolCallbacks());
+                } else if (asyncMcpToolCallbackProvider != null) {
+                    log.info("Using Async MCP tool callbacks for investigation");
+                    chatClientBuilder.defaultTools(asyncMcpToolCallbackProvider.getToolCallbacks());
+                } else {
+                    log.warn("MCP is enabled but no tool callback provider is available");
+                }
+            }
+            
+            String response = chatClientBuilder.build()
+                .prompt()
                 .user(prompt)
-                .options(GeminiChatModel.GeminiChatOptions.builder()
-                    .withModel("gemini-2.0-flash-exp")
-                    .withTemperature(0.1f)
-                    .withMaxOutputTokens(2000)
-                    .build())
                 .call()
                 .content();
                 
-            log.info("Generated AI response with length: {} characters", response.length());
+            log.info("Generated AI response with length: {} characters using OpenAI", 
+                     response.length());
             return response;
             
         } catch (Exception e) {
-            log.error("Failed to generate AI investigation response: {}", e.getMessage(), e);
+            log.error("Failed to generate AI investigation response with OpenAI: {}", 
+                      e.getMessage(), e);
             return generateFallbackResponse(context, currentQuery, e);
         }
     }
 
     public String generateFollowUpResponse(SessionContext context, String followUpQuery) {
-        log.info("Generating AI follow-up response for session: {}", context.getSessionId());
+        log.info("Generating AI follow-up response for session: {} using OpenAI", 
+                 context.getSessionId());
         
         try {
             String prompt = promptBuilder.buildContinuationPrompt(context, followUpQuery);
             
+            // Use default model options - provider-agnostic approach
             String response = chatClient.prompt()
                 .user(prompt)
-                .options(GeminiChatModel.GeminiChatOptions.builder()
-                    .withModel("gemini-2.0-flash-exp")
-                    .withTemperature(0.2f)
-                    .withMaxOutputTokens(1500)
-                    .build())
                 .call()
                 .content();
                 
-            log.info("Generated AI follow-up response with length: {} characters", response.length());
+            log.info("Generated follow-up response with length: {} characters using OpenAI", 
+                     response.length());
             return response;
             
         } catch (Exception e) {
-            log.error("Failed to generate AI follow-up response: {}", e.getMessage(), e);
+            log.error("Failed to generate AI follow-up response with OpenAI: {}", 
+                      e.getMessage(), e);
             return generateFallbackResponse(context, followUpQuery, e);
         }
     }
 
     public String generateSessionSummary(SessionContext context) {
-        log.info("Generating session summary for session: {}", context.getSessionId());
+        log.info("Generating session summary for session: {} using OpenAI", 
+                 context.getSessionId());
         
         try {
             String prompt = promptBuilder.buildSummaryPrompt(context);
             
+            // Use default model options - provider-agnostic approach
             String response = chatClient.prompt()
                 .user(prompt)
-                .options(GeminiChatModel.GeminiChatOptions.builder()
-                    .withModel("gemini-2.0-flash-exp")
-                    .withTemperature(0.1f)
-                    .withMaxOutputTokens(1000)
-                    .build())
                 .call()
                 .content();
                 
-            log.info("Generated session summary with length: {} characters", response.length());
+            log.info("Generated session summary with length: {} characters using OpenAI", 
+                     response.length());
             return response;
             
         } catch (Exception e) {
-            log.error("Failed to generate session summary: {}", e.getMessage(), e);
+            log.error("Failed to generate session summary with OpenAI: {}", 
+                      e.getMessage(), e);
             return "Unable to generate session summary due to AI service error.";
         }
     }
 
     public boolean isHealthy() {
         try {
+            log.debug("Performing health check with OpenAI");
+            
+            // Use default model options - provider-agnostic approach
             String testResponse = chatClient.prompt()
                 .user("Respond with 'OK' if you can process this request.")
-                .options(GeminiChatModel.GeminiChatOptions.builder()
-                    .withModel("gemini-2.0-flash-exp")
-                    .withTemperature(0.0f)
-                    .withMaxOutputTokens(10)
-                    .build())
                 .call()
                 .content();
                 
-            return testResponse != null && testResponse.toLowerCase().contains("ok");
+            boolean isHealthy = testResponse != null && testResponse.toLowerCase().contains("ok");
+            log.debug("Health check result with OpenAI: {}", isHealthy);
+            
+            return isHealthy;
             
         } catch (Exception e) {
-            log.warn("AI service health check failed: {}", e.getMessage());
+            log.warn("AI service health check failed with OpenAI: {}", 
+                     e.getMessage());
             return false;
         }
     }

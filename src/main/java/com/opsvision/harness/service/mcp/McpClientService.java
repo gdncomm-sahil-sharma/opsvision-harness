@@ -1,5 +1,7 @@
 package com.opsvision.harness.service.mcp;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opsvision.harness.exception.McpClientException;
 import com.opsvision.harness.model.dto.ToolResult;
 import com.opsvision.harness.model.enums.ToolExecutionStatus;
@@ -7,7 +9,12 @@ import com.opsvision.harness.model.enums.ToolType;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.ai.mcp.AsyncMcpToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -21,12 +28,23 @@ public class McpClientService {
     private static final Logger log = LoggerFactory.getLogger(McpClientService.class);
     
     @Autowired
-    private ToolInvoker toolInvoker;
+    private ChatClient chatClient;
     
     @Autowired
-    private InternalToolService internalToolService;
+    private ChatModel chatModel;
+    
+    @Autowired(required = false)
+    private SyncMcpToolCallbackProvider syncMcpToolCallbackProvider;
 
-    @CircuitBreaker(name = "mcp-client", fallbackMethod = "fallbackInvokeTools")
+    @Autowired(required = false)
+    private AsyncMcpToolCallbackProvider asyncMcpToolCallbackProvider;
+
+    @Value("${spring.ai.mcp.enabled:false}")
+    private boolean mcpEnabled;
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @CircuitBreaker(name = "mcp-client")
     public List<ToolResult> invokeTools(List<ToolType> toolTypes, String orderId) {
         log.info("Invoking {} MCP tools for order: {}", toolTypes.size(), orderId);
         
@@ -76,82 +94,81 @@ public class McpClientService {
     public ToolResult invokeTool(ToolType toolType, String orderId) {
         log.debug("Invoking single tool: {} for order: {}", toolType.getToolName(), orderId);
         
-        // First try external MCP server
-        ToolResult result = switch (toolType) {
-            case GET_ORDER_TIMELINE -> toolInvoker.getOrderTimeline(orderId);
-            case GET_TASK_HISTORY -> toolInvoker.getTaskHistory(orderId);
-            case GET_INVENTORY_HISTORY -> toolInvoker.getInventoryHistory(orderId);
-            case GET_AUDIT_EVENTS -> toolInvoker.getAuditEvents(orderId);
-        };
+        // Direct Spring AI MCP tool invocation
+        return invokeSpringAiTool(toolType, orderId);
+    }
+
+    /**
+     * Invoke MCP tools using Spring AI ChatClient with registered functions
+     */
+    private ToolResult invokeSpringAiTool(ToolType toolType, String orderId) {
+        long startTime = System.currentTimeMillis();
         
-        // If external MCP call failed, fallback to internal tools
-        if (result.getStatus() == ToolExecutionStatus.FAILED) {
-            log.info("External MCP tool {} failed, falling back to internal implementation", toolType.getToolName());
-            
-            result = switch (toolType) {
-                case GET_ORDER_TIMELINE -> internalToolService.getOrderTimeline(orderId);
-                case GET_TASK_HISTORY -> internalToolService.getTaskHistory(orderId);
-                case GET_INVENTORY_HISTORY -> internalToolService.getInventoryHistory(orderId);
-                case GET_AUDIT_EVENTS -> internalToolService.getAuditEvents(orderId);
+        try {
+            // Create a prompt that will trigger the specific function call
+            String functionPrompt = switch (toolType) {
+                case GET_ORDER_TIMELINE -> "Call the getOrderTimeline function for order " + orderId;
+                case GET_TASK_HISTORY -> "Call the getTaskHistory function for order " + orderId;
+                case GET_INVENTORY_HISTORY -> "Call the getInventoryHistory function for order " + orderId;
+                case GET_AUDIT_EVENTS -> "Call the getAuditEvents function for order " + orderId;
             };
             
-            if (result.isSuccess()) {
-                log.info("Internal tool {} succeeded for order: {}", toolType.getToolName(), orderId);
+            // Create ChatClient with MCP tools if available
+            ChatClient.Builder chatClientBuilder = ChatClient.builder(chatModel);
+            
+            // Add MCP tool callbacks if MCP is enabled and tool provider is available
+            if (mcpEnabled) {
+                if (syncMcpToolCallbackProvider != null) {
+                    log.info("Using Sync MCP tool callbacks for tool: {}", toolType.getToolName());
+                    chatClientBuilder.defaultToolCallbacks(syncMcpToolCallbackProvider);
+                } else if (asyncMcpToolCallbackProvider != null) {
+                    log.info("Using Async MCP tool callbacks for tool: {}", toolType.getToolName());
+                    chatClientBuilder.defaultToolCallbacks(asyncMcpToolCallbackProvider);
+                } else {
+                    log.warn("MCP is enabled but no tool callback provider is available");
+                }
             }
-        }
-        
-        return result;
-    }
-
-    public List<ToolResult> invokeToolsWithFallback(List<ToolType> toolTypes, String orderId) {
-        try {
-            return invokeTools(toolTypes, orderId);
-        } catch (Exception e) {
-            log.warn("MCP tools invocation failed, returning empty results: {}", e.getMessage());
-            return createFallbackResults(toolTypes, e.getMessage());
-        }
-    }
-
-    // Fallback method for circuit breaker
-    public List<ToolResult> fallbackInvokeTools(List<ToolType> toolTypes, String orderId, Exception ex) {
-        log.error("Circuit breaker activated for MCP client, using internal tools fallback: {}", ex.getMessage());
-        
-        List<ToolResult> results = new ArrayList<>();
-        for (ToolType toolType : toolTypes) {
+            
+            String response = chatClientBuilder.build()
+                .prompt()
+                .user(functionPrompt)
+                .call()
+                .content();
+            
+            long executionTime = System.currentTimeMillis() - startTime;
+            
+            ToolResult result = new ToolResult(toolType, Map.of("orderId", orderId));
+            result.setExecutionTimeMs((int) executionTime);
+            result.setStatus(ToolExecutionStatus.SUCCESS);
+            
+            // Try to parse response as JSON
             try {
-                ToolResult result = switch (toolType) {
-                    case GET_ORDER_TIMELINE -> internalToolService.getOrderTimeline(orderId);
-                    case GET_TASK_HISTORY -> internalToolService.getTaskHistory(orderId);
-                    case GET_INVENTORY_HISTORY -> internalToolService.getInventoryHistory(orderId);
-                    case GET_AUDIT_EVENTS -> internalToolService.getAuditEvents(orderId);
-                };
-                
-                results.add(result);
-                log.debug("Internal fallback tool {} completed successfully", toolType.getToolName());
-                
-            } catch (Exception internalEx) {
-                log.error("Internal tool {} also failed: {}", toolType.getToolName(), internalEx.getMessage());
-                
-                ToolResult failedResult = new ToolResult(toolType, Map.of("order_id", orderId));
-                failedResult.setStatus(ToolExecutionStatus.FAILED);
-                failedResult.setErrorMessage("Both external MCP and internal tools failed: " + internalEx.getMessage());
-                results.add(failedResult);
+                JsonNode jsonResult = objectMapper.readTree(response);
+                result.setResult(jsonResult);
+                log.debug("Successfully invoked function {} in {}ms", toolType.getToolName(), executionTime);
+            } catch (Exception e) {
+                // If not JSON, store as string  
+                result.setResult(objectMapper.createObjectNode().put("response", response));
+                log.debug("Function {} returned non-JSON response in {}ms", toolType.getToolName(), executionTime);
             }
+            
+            return result;
+            
+        } catch (Exception e) {
+            long executionTime = System.currentTimeMillis() - startTime;
+            log.error("Function {} failed after {}ms: {}", toolType.getToolName(), executionTime, e.getMessage());
+            
+            ToolResult result = new ToolResult(toolType, Map.of("orderId", orderId));
+            result.setExecutionTimeMs((int) executionTime);
+            result.setStatus(ToolExecutionStatus.FAILED);
+            result.setErrorMessage("Function call error: " + e.getMessage());
+            
+            return result;
         }
-        
-        return results;
     }
 
-    private List<ToolResult> createFallbackResults(List<ToolType> toolTypes, String errorMessage) {
-        return toolTypes.stream()
-            .map(toolType -> {
-                ToolResult result = new ToolResult(toolType, Map.of());
-                result.setStatus(ToolExecutionStatus.FAILED);
-                result.setErrorMessage(errorMessage);
-                return result;
-            })
-            .collect(Collectors.toList());
-    }
+
+
 
     private void logExecutionSummary(List<ToolResult> results) {
         long successCount = results.stream()
@@ -173,12 +190,39 @@ public class McpClientService {
     public boolean isHealthy() {
         try {
             // Perform a simple health check by calling a lightweight tool
-            // This will now fallback to internal tools if MCP server is unavailable
             ToolResult result = invokeTool(ToolType.GET_ORDER_TIMELINE, "health-check");
             return result.isSuccess();
         } catch (Exception e) {
-            log.warn("MCP and internal tools health check failed: {}", e.getMessage());
+            log.warn("MCP health check failed: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Gather comprehensive investigation data using MCP tools
+     * Following Medium article pattern for enhanced AI integration
+     */
+    public String gatherInvestigationData(String orderId) {
+        log.info("Gathering investigation data for order: {}", orderId);
+        
+        try {
+            // Use existing invokeTools method for comprehensive data gathering
+            List<ToolResult> results = invokeTools(Arrays.asList(
+                ToolType.GET_ORDER_TIMELINE,
+                ToolType.GET_TASK_HISTORY,
+                ToolType.GET_INVENTORY_HISTORY,
+                ToolType.GET_AUDIT_EVENTS
+            ), orderId);
+            
+            // Format results as a structured investigation report
+            return results.stream()
+                .filter(ToolResult::isSuccess)
+                .map(result -> "=== " + result.getToolType() + " ===\n" + result.getResult().toString())
+                .collect(Collectors.joining("\n\n"));
+                
+        } catch (Exception e) {
+            log.error("Error gathering investigation data: {}", e.getMessage());
+            return "Error gathering investigation data: " + e.getMessage();
         }
     }
 }
