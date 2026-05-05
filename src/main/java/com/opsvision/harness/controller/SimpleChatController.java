@@ -43,9 +43,8 @@ public class SimpleChatController {
             log.info("📨 Received structured chat message from user: {}", message.getUserId());
             log.info("📝 Message content: {}", message.getMessage());
             
-            // Use AI Assistant Service to generate structured response
-            String model = "openai"; // Default model
-            ChatResponseData responseData = aiAssistantService.generateStructuredResponse(message.getMessage(), model);
+            ChatResponseData responseData = aiAssistantService.generateStructuredResponse(
+                    message.getUserId(), message.getMessage());
             
             StructuredChatResponse structuredResponse = new StructuredChatResponse(
                 200, 
