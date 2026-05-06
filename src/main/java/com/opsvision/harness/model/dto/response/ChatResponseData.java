@@ -14,7 +14,7 @@ import java.util.Map;
  * emits component-completion events in the same order, so the UI can render
  * textResponse → timelines → table without reshuffling.
  */
-@JsonPropertyOrder({"textResponse", "timelines", "table", "references"})
+@JsonPropertyOrder({"textResponse", "timelines", "table", "references", "answered", "unansweredReason"})
 public class ChatResponseData {
     @JsonProperty("textResponse")
     private TextResponse textResponse;
@@ -35,6 +35,25 @@ public class ChatResponseData {
     @JsonProperty("references")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> references;
+
+    /**
+     * LLM self-grade: did this turn substantively answer the user's question?
+     * Boxed Boolean so {@code null} (no grade — legacy or LLM forgot) stays
+     * distinct from {@code false} (explicit "couldn't answer"). Written last
+     * in the streamed JSON so the model grades after producing the body
+     * (post-hoc grading is more honest than committing a verdict up front).
+     */
+    @JsonProperty("answered")
+    private Boolean answered;
+
+    /**
+     * One short phrase naming the gap when {@link #answered} is {@code false}
+     * (e.g. "no tool indexes by picker_id"). Omitted from the wire format
+     * when null, which is the common case for {@code answered=true} turns.
+     */
+    @JsonProperty("unansweredReason")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String unansweredReason;
 
     public ChatResponseData() {}
 
@@ -80,5 +99,21 @@ public class ChatResponseData {
 
     public void setReferences(Map<String, Object> references) {
         this.references = references;
+    }
+
+    public Boolean getAnswered() {
+        return answered;
+    }
+
+    public void setAnswered(Boolean answered) {
+        this.answered = answered;
+    }
+
+    public String getUnansweredReason() {
+        return unansweredReason;
+    }
+
+    public void setUnansweredReason(String unansweredReason) {
+        this.unansweredReason = unansweredReason;
     }
 }

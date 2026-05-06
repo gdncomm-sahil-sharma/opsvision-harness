@@ -108,7 +108,11 @@ public class ChatsController {
                 c.getQuery(),
                 c.getResponse(),
                 c.getContextData(),
-                c.getCreatedAt()
+                c.getCreatedAt(),
+                c.getAnswered(),
+                c.getUnansweredReason(),
+                c.getHelpful(),
+                c.getFeedbackComment()
         );
     }
 }

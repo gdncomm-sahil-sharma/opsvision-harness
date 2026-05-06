@@ -138,10 +138,13 @@ public class AIAssistantService {
                     : "(no summary)";
             conversation.setResponse(summary);
             conversation.setContextData(referencesAsJson(responseData));
+            conversation.setAnswered(responseData != null ? responseData.getAnswered() : null);
+            conversation.setUnansweredReason(responseData != null ? responseData.getUnansweredReason() : null);
             conversationRepository.save(conversation);
 
-            log.info("Chat completed; conversation={} tools={}",
-                    conversation.getId(), invokedTools);
+            log.info("Chat completed; conversation={} tools={} answered={}",
+                    conversation.getId(), invokedTools,
+                    responseData != null ? responseData.getAnswered() : null);
             return new ChatTurnResult(session.getId(), responseData);
 
         } catch (Exception e) {
@@ -273,6 +276,8 @@ public class AIAssistantService {
                             try {
                                 conv.setResponse(summary);
                                 conv.setContextData(referencesAsJson(data));
+                                conv.setAnswered(data.getAnswered());
+                                conv.setUnansweredReason(data.getUnansweredReason());
                                 conversationRepository.save(conv);
                             } catch (Exception persistError) {
                                 log.warn("Failed to persist streaming conversation: {}",

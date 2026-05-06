@@ -34,6 +34,7 @@ public interface ConversationRepository extends JpaRepository<Conversation, UUID
            "WHERE c.session.id = :sessionId " +
            "  AND c.response IS NOT NULL " +
            "  AND c.response NOT LIKE 'ERROR:%' " +
+           "  AND (c.answered IS NULL OR c.answered = true) " +
            "ORDER BY c.sequenceNumber DESC " +
            "LIMIT :limit")
     List<Conversation> findRecentForMemoryReplay(@Param("sessionId") UUID sessionId,

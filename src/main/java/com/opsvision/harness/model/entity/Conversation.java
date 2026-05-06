@@ -39,11 +39,33 @@ public class Conversation {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "context_data", columnDefinition = "jsonb")
     private JsonNode contextData;
-    
+
+    /** LLM self-grade: did this turn actually answer the user's question?
+     *  Null = not graded yet (legacy rows or LLM forgot). Memory replay
+     *  filters out only explicit {@code false}. */
+    @Column(name = "answered")
+    private Boolean answered;
+
+    /** When {@link #answered} is {@code false}, a short phrase describing
+     *  the gap (e.g. "no tool indexes by picker_id"). Null otherwise. */
+    @Column(name = "unanswered_reason", columnDefinition = "TEXT")
+    private String unansweredReason;
+
+    /** User-submitted thumbs-up ({@code true}) / thumbs-down ({@code false}).
+     *  Null when no feedback has been submitted yet. */
+    @Column(name = "helpful")
+    private Boolean helpful;
+
+    /** Optional free-text comment paired with {@link #helpful}. Capped to
+     *  2000 chars by the service before persistence. Null if user gave
+     *  feedback without a comment, or no feedback at all. */
+    @Column(name = "feedback_comment", columnDefinition = "TEXT")
+    private String feedbackComment;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
-    
+
     @OneToMany(mappedBy = "conversation", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<ToolExecution> toolExecutions;
 
@@ -103,6 +125,38 @@ public class Conversation {
 
     public void setContextData(JsonNode contextData) {
         this.contextData = contextData;
+    }
+
+    public Boolean getAnswered() {
+        return answered;
+    }
+
+    public void setAnswered(Boolean answered) {
+        this.answered = answered;
+    }
+
+    public String getUnansweredReason() {
+        return unansweredReason;
+    }
+
+    public void setUnansweredReason(String unansweredReason) {
+        this.unansweredReason = unansweredReason;
+    }
+
+    public Boolean getHelpful() {
+        return helpful;
+    }
+
+    public void setHelpful(Boolean helpful) {
+        this.helpful = helpful;
+    }
+
+    public String getFeedbackComment() {
+        return feedbackComment;
+    }
+
+    public void setFeedbackComment(String feedbackComment) {
+        this.feedbackComment = feedbackComment;
     }
 
     public LocalDateTime getCreatedAt() {
