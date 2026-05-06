@@ -34,8 +34,23 @@ public interface ConversationRepository extends JpaRepository<Conversation, UUID
            "WHERE c.session.id = :sessionId " +
            "  AND c.response IS NOT NULL " +
            "  AND c.response NOT LIKE 'ERROR:%' " +
+           "  AND (c.answered IS NULL OR c.answered = true) " +
            "ORDER BY c.sequenceNumber DESC " +
            "LIMIT :limit")
     List<Conversation> findRecentForMemoryReplay(@Param("sessionId") UUID sessionId,
                                                  @Param("limit") int limit);
+
+    /** Oldest-first message history for a chat — used by the message-history endpoint. */
+    List<Conversation> findBySessionIdOrderBySequenceNumberAsc(UUID sessionId);
+
+    /** Most recent {@code created_at} across all conversations in a session,
+     *  used to power {@code lastMessageAt} on the chat-list endpoint. Null when
+     *  the chat has no messages yet (caller falls back to {@code createdAt}). */
+    @Query("SELECT MAX(c.createdAt) FROM Conversation c WHERE c.session.id = :sessionId")
+    Optional<java.time.LocalDateTime> findLatestCreatedAtForSession(@Param("sessionId") UUID sessionId);
+
+    /** Look up one turn within a chat by its sequence number — used by the
+     *  feedback endpoint to find the target row before upserting helpful /
+     *  feedback_comment. Empty when the seq is out of range for that chat. */
+    Optional<Conversation> findBySessionIdAndSequenceNumber(UUID sessionId, Integer sequenceNumber);
 }

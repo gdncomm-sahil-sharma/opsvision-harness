@@ -32,4 +32,12 @@ public interface SessionRepository extends JpaRepository<Session, UUID> {
     
     @Query("SELECT s FROM Session s LEFT JOIN FETCH s.conversations WHERE s.id = :sessionId")
     Optional<Session> findByIdWithConversations(@Param("sessionId") UUID sessionId);
+
+    /** Sidebar list query: chats for a user filtered by status, newest first. */
+    List<Session> findByUserIdAndStatusOrderByCreatedAtDesc(String userId, SessionStatus status);
+
+    /** Single round-trip ownership check: returns the session only if it belongs
+     *  to the given user. Empty result means "not found OR not owned" — callers
+     *  should not distinguish on the wire (avoid leaking existence). */
+    Optional<Session> findByIdAndUserId(UUID id, String userId);
 }

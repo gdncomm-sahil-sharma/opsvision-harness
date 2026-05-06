@@ -31,7 +31,13 @@ public class Session {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 50)
     private SessionStatus status;
-    
+
+    /** User-editable display title. NULL means "no explicit title" — the
+     *  API derives a display title from {@link #initialQuery} via
+     *  {@link #deriveTitle(String)} when this is null. */
+    @Column(length = 255)
+    private String title;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -89,6 +95,35 @@ public class Session {
 
     public void setStatus(SessionStatus status) {
         this.status = status;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
+    /**
+     * Returns this session's display title — the explicit {@code title} if
+     * one is set, otherwise a value derived from {@code initialQuery}.
+     */
+    public String getDisplayTitle() {
+        return title != null ? title : deriveTitle(initialQuery);
+    }
+
+    /**
+     * Build a display title from a raw query: collapse internal whitespace
+     * (so multi-line questions don't render with embedded newlines), trim,
+     * and truncate to 80 chars (with an ellipsis suffix when truncated).
+     */
+    public static String deriveTitle(String initialQuery) {
+        if (initialQuery == null) return "Untitled chat";
+        String collapsed = initialQuery.replaceAll("\\s+", " ").trim();
+        if (collapsed.isEmpty()) return "Untitled chat";
+        if (collapsed.length() <= 80) return collapsed;
+        return collapsed.substring(0, 80) + "…";
     }
 
     public LocalDateTime getCreatedAt() {

@@ -3,6 +3,7 @@ package com.opsvision.harness.model.dto.response;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * One event in the SSE stream from POST /api/chat/stream. Discriminator is
@@ -10,6 +11,7 @@ import java.util.Map;
  * over SSE as JSON in the {@code data:} field of each event.
  *
  * Types:
+ *   chat_id                 — chatId (resolved chat UUID; emitted FIRST so the UI can update its store immediately)
  *   tool_call_start         — toolName, input
  *   tool_call_end           — toolName, latencyMs, status (SUCCESS|FAILED|CACHE_HIT), errorMessage
  *   assistant_token         — token (incremental token chunk from the LLM)
@@ -41,11 +43,12 @@ public class StreamEvent {
     private final Timeline timeline;
     private final Table table;
     private final Map<String, Object> references;
+    private final UUID chatId;
 
     private StreamEvent(String type, String toolName, String input, Long latencyMs,
                         String status, String token, ChatResponseData data, String errorMessage,
                         TextResponse textResponse, Timeline timeline, Table table,
-                        Map<String, Object> references) {
+                        Map<String, Object> references, UUID chatId) {
         this.type = type;
         this.toolName = toolName;
         this.input = input;
@@ -58,51 +61,57 @@ public class StreamEvent {
         this.timeline = timeline;
         this.table = table;
         this.references = references;
+        this.chatId = chatId;
+    }
+
+    public static StreamEvent chatId(UUID chatId) {
+        return new StreamEvent("chat_id", null, null, null, null, null, null, null,
+                null, null, null, null, chatId);
     }
 
     public static StreamEvent toolCallStart(String toolName, String input) {
         return new StreamEvent("tool_call_start", toolName, input, null, null, null, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public static StreamEvent toolCallEnd(String toolName, long latencyMs, String status, String errorMessage) {
         return new StreamEvent("tool_call_end", toolName, null, latencyMs, status, null, null, errorMessage,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public static StreamEvent assistantToken(String token) {
         return new StreamEvent("assistant_token", null, null, null, null, token, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public static StreamEvent textResponseComplete(TextResponse textResponse) {
         return new StreamEvent("text_response_complete", null, null, null, null, null, null, null,
-                textResponse, null, null, null);
+                textResponse, null, null, null, null);
     }
 
     public static StreamEvent timelineComplete(Timeline timeline) {
         return new StreamEvent("timeline_complete", null, null, null, null, null, null, null,
-                null, timeline, null, null);
+                null, timeline, null, null, null);
     }
 
     public static StreamEvent tableComplete(Table table) {
         return new StreamEvent("table_complete", null, null, null, null, null, null, null,
-                null, null, table, null);
+                null, null, table, null, null);
     }
 
     public static StreamEvent referencesComplete(Map<String, Object> references) {
         return new StreamEvent("references_complete", null, null, null, null, null, null, null,
-                null, null, null, references);
+                null, null, null, references, null);
     }
 
     public static StreamEvent finalResponse(ChatResponseData data) {
         return new StreamEvent("final", null, null, null, null, null, data, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public static StreamEvent error(String message) {
         return new StreamEvent("error", null, null, null, null, null, null, message,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public String getType() { return type; }
@@ -117,4 +126,5 @@ public class StreamEvent {
     public Timeline getTimeline() { return timeline; }
     public Table getTable() { return table; }
     public Map<String, Object> getReferences() { return references; }
+    public UUID getChatId() { return chatId; }
 }
