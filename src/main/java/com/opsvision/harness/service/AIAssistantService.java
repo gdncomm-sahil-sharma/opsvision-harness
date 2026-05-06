@@ -3,6 +3,7 @@ package com.opsvision.harness.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opsvision.harness.model.dto.response.ChatResponseData;
+import com.opsvision.harness.model.dto.response.StreamEvent;
 import com.opsvision.harness.model.dto.response.TextResponse;
 import com.opsvision.harness.model.entity.Conversation;
 import com.opsvision.harness.model.entity.Session;
@@ -17,6 +18,7 @@ import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ToolContext;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
@@ -25,6 +27,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -147,6 +153,123 @@ public class AIAssistantService {
         return Collections.unmodifiableList(INVOKED_TOOLS.get());
     }
 
+    /**
+     * Streaming variant of {@link #generateStructuredResponse}. Emits SSE events
+     * as the LLM works: a {@code tool_call_start} / {@code tool_call_end} pair
+     * around each MCP tool invocation, an {@code assistant_token} per token chunk
+     * from the model, and a final {@code final} event with the parsed
+     * {@link ChatResponseData}. Errors surface as a single {@code error} event.
+     *
+     * <p>The full chat pipeline (memory advisor, RecordingToolCallback wrapping,
+     * cache lookups, ToolExecution persistence, Conversation persistence) runs on
+     * a {@link Schedulers#boundedElastic()} worker so the controller's reactive
+     * thread is not blocked while tools execute and the model streams.
+     */
+    public Flux<StreamEvent> streamStructuredResponse(String userId, String userMessage) {
+        log.info("Streaming structured chat for user '{}': {}", userId, userMessage);
+        Sinks.Many<StreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+
+        Mono.fromRunnable(() -> runStreamInternal(userId, userMessage, sink))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
+
+        return sink.asFlux();
+    }
+
+    private void runStreamInternal(String userId, String userMessage, Sinks.Many<StreamEvent> sink) {
+        INVOKED_TOOLS.get().clear();
+        Conversation conversation = null;
+
+        try {
+            Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
+            conversation = persistInitialConversation(session, userMessage);
+            CURRENT_CONVERSATION_ID.set(conversation.getId());
+
+            ToolCallback[] callbacks = wrappedCallbacks(sink);
+            log.info("Stream prompt: session={} conversation={} tools={}",
+                    session.getId(), conversation.getId(), callbacks.length);
+
+            MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory)
+                    .conversationId(session.getId().toString())
+                    .build();
+
+            ChatClient client = ChatClient.builder(chatModel)
+                    .defaultSystem(getLLMPrompt())
+                    .defaultAdvisors(memoryAdvisor)
+                    .build();
+
+            BeanOutputConverter<ChatResponseData> converter =
+                    new BeanOutputConverter<>(ChatResponseData.class);
+
+            StringBuilder accumulated = new StringBuilder();
+            final Conversation conv = conversation;
+
+            client.prompt()
+                    .user(userMessage + "\n\n" + converter.getFormat())
+                    .toolCallbacks(callbacks)
+                    .stream()
+                    .content()
+                    .doOnNext(token -> {
+                        accumulated.append(token);
+                        sink.tryEmitNext(StreamEvent.assistantToken(token));
+                    })
+                    .doOnError(err -> {
+                        log.error("Stream error", err);
+                        sink.tryEmitNext(StreamEvent.error(err.getMessage()));
+                        try {
+                            conv.setResponse("ERROR: " + err.getMessage());
+                            conversationRepository.save(conv);
+                        } catch (Exception ignore) {
+                            // best effort
+                        }
+                    })
+                    .doOnComplete(() -> {
+                        String fullText = accumulated.toString();
+                        ChatResponseData data = null;
+                        try {
+                            data = converter.convert(fullText);
+                        } catch (Exception parseError) {
+                            log.warn("Stream final parse failed: {}", parseError.getMessage());
+                            sink.tryEmitNext(StreamEvent.error(
+                                    "structured-output parse failed: " + parseError.getMessage()));
+                        }
+                        if (data != null) {
+                            String summary = data.getTextResponse() != null
+                                    ? data.getTextResponse().getSummary()
+                                    : "(no summary)";
+                            try {
+                                conv.setResponse(summary);
+                                conversationRepository.save(conv);
+                            } catch (Exception persistError) {
+                                log.warn("Failed to persist streaming conversation: {}",
+                                        persistError.getMessage());
+                            }
+                            sink.tryEmitNext(StreamEvent.finalResponse(data));
+                        }
+                        log.info("Stream completed; conversation={} tools={}",
+                                conv.getId(), INVOKED_TOOLS.get());
+                    })
+                    .doFinally(sig -> sink.tryEmitComplete())
+                    .blockLast();
+
+        } catch (Exception e) {
+            log.error("Stream setup failed", e);
+            sink.tryEmitNext(StreamEvent.error(e.getMessage()));
+            if (conversation != null) {
+                try {
+                    conversation.setResponse("ERROR: " + e.getMessage());
+                    conversationRepository.save(conversation);
+                } catch (Exception ignore) {
+                    // best effort
+                }
+            }
+            sink.tryEmitComplete();
+        } finally {
+            INVOKED_TOOLS.remove();
+            CURRENT_CONVERSATION_ID.remove();
+        }
+    }
+
     private ChatResponseData createFallbackResponse(String userMessage, Exception error) {
         TextResponse text = new TextResponse(
                 "I encountered an error processing your request: " + error.getMessage(),
@@ -180,6 +303,10 @@ public class AIAssistantService {
     }
 
     private ToolCallback[] wrappedCallbacks() {
+        return wrappedCallbacks(null);
+    }
+
+    private ToolCallback[] wrappedCallbacks(Sinks.Many<StreamEvent> stream) {
         if (mcpToolProvider == null) {
             return new ToolCallback[0];
         }
@@ -189,7 +316,7 @@ public class AIAssistantService {
         }
         ToolCallback[] wrapped = new ToolCallback[raw.length];
         for (int i = 0; i < raw.length; i++) {
-            wrapped[i] = new RecordingToolCallback(raw[i]);
+            wrapped[i] = new RecordingToolCallback(raw[i], stream);
         }
         return wrapped;
     }
@@ -291,9 +418,15 @@ public class AIAssistantService {
     private final class RecordingToolCallback implements ToolCallback {
 
         private final ToolCallback delegate;
+        private final Sinks.Many<StreamEvent> stream;
 
         RecordingToolCallback(ToolCallback delegate) {
+            this(delegate, null);
+        }
+
+        RecordingToolCallback(ToolCallback delegate, Sinks.Many<StreamEvent> stream) {
             this.delegate = delegate;
+            this.stream = stream;
         }
 
         @Override
@@ -315,6 +448,7 @@ public class AIAssistantService {
             String name = safeName();
             INVOKED_TOOLS.get().add(name);
             UUID convId = CURRENT_CONVERSATION_ID.get();
+            emit(StreamEvent.toolCallStart(name, toolInput));
 
             String cacheKey = cacheKey(name, toolInput);
             String cached = lookupCache(cacheKey);
@@ -322,6 +456,7 @@ public class AIAssistantService {
                 log.info("MCP tool cache HIT: {} key={}", name, cacheKey);
                 persistToolExecution(convId, name, toolInput, cached, 0,
                         ToolExecutionStatus.SUCCESS, "cache-hit");
+                emit(StreamEvent.toolCallEnd(name, 0, "CACHE_HIT", null));
                 return cached;
             }
 
@@ -334,6 +469,7 @@ public class AIAssistantService {
                 storeCache(cacheKey, result);
                 persistToolExecution(convId, name, toolInput, result, elapsed,
                         ToolExecutionStatus.SUCCESS, null);
+                emit(StreamEvent.toolCallEnd(name, elapsed, "SUCCESS", null));
                 return result;
             } catch (RuntimeException e) {
                 long elapsed = System.currentTimeMillis() - start;
@@ -341,7 +477,14 @@ public class AIAssistantService {
                         name, elapsed, e.getMessage());
                 persistToolExecution(convId, name, toolInput, null, elapsed,
                         ToolExecutionStatus.FAILED, e.getMessage());
+                emit(StreamEvent.toolCallEnd(name, elapsed, "FAILED", e.getMessage()));
                 throw e;
+            }
+        }
+
+        private void emit(StreamEvent event) {
+            if (stream != null) {
+                stream.tryEmitNext(event);
             }
         }
 

@@ -5,12 +5,14 @@ import com.opsvision.harness.model.dto.response.*;
 import com.opsvision.harness.service.AIAssistantService;
 import com.opsvision.harness.service.DynamicMcpService;
 import com.opsvision.harness.service.McpSessionHealthMonitor;
-import com.opsvision.harness.service.ToolCallbackTestService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -30,9 +32,6 @@ public class SimpleChatController {
     
     @Autowired
     private McpSessionHealthMonitor sessionHealthMonitor;
-    
-    @Autowired
-    private ToolCallbackTestService testService;
 
     /**
      * Main chat endpoint - Returns structured response with text, timelines, and tables
@@ -70,6 +69,24 @@ public class SimpleChatController {
             
             return ResponseEntity.internalServerError().body(errorResponse);
         }
+    }
+
+    /**
+     * Streaming chat endpoint. Server-Sent Events: each event's {@code event:}
+     * field carries the StreamEvent type ({@code tool_call_start},
+     * {@code tool_call_end}, {@code assistant_token}, {@code final},
+     * {@code error}); the {@code data:} field is the JSON-serialized
+     * StreamEvent payload. Smoke-test with {@code curl -N}.
+     */
+    @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<StreamEvent>> chatStream(@RequestBody ChatMessage message) {
+        log.info("📡 Streaming chat request from user: {}", message.getUserId());
+        return aiAssistantService
+                .streamStructuredResponse(message.getUserId(), message.getMessage())
+                .map(event -> ServerSentEvent.<StreamEvent>builder()
+                        .event(event.getType())
+                        .data(event)
+                        .build());
     }
 
     /**
@@ -212,26 +229,6 @@ public class SimpleChatController {
             log.error("Failed to refresh tools", e);
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("error", "Failed to refresh tools: " + e.getMessage());
-            return ResponseEntity.status(500).body(errorResponse);
-        }
-    }
-    
-    /**
-     * Test endpoint to explore ToolCallback methods
-     */
-    @GetMapping("/test-toolcallback")
-    public ResponseEntity<?> testToolCallback() {
-        try {
-            testService.exploreToolCallbackMethods();
-            
-            Map<String, Object> response = new HashMap<>();
-            response.put("message", "Tool callback methods explored - check logs");
-            return ResponseEntity.ok(response);
-            
-        } catch (Exception e) {
-            log.error("Failed to explore tool callback methods", e);
-            Map<String, Object> errorResponse = new HashMap<>();
-            errorResponse.put("error", "Failed to explore methods: " + e.getMessage());
             return ResponseEntity.status(500).body(errorResponse);
         }
     }
