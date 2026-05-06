@@ -29,4 +29,13 @@ public interface ConversationRepository extends JpaRepository<Conversation, UUID
     
     @Query("SELECT c FROM Conversation c LEFT JOIN FETCH c.toolExecutions WHERE c.session.id = :sessionId ORDER BY c.sequenceNumber ASC")
     List<Conversation> findBySessionIdWithToolExecutions(@Param("sessionId") UUID sessionId);
+
+    @Query("SELECT c FROM Conversation c " +
+           "WHERE c.session.id = :sessionId " +
+           "  AND c.response IS NOT NULL " +
+           "  AND c.response NOT LIKE 'ERROR:%' " +
+           "ORDER BY c.sequenceNumber DESC " +
+           "LIMIT :limit")
+    List<Conversation> findRecentForMemoryReplay(@Param("sessionId") UUID sessionId,
+                                                 @Param("limit") int limit);
 }

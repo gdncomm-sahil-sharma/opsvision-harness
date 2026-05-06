@@ -2,10 +2,19 @@ package com.opsvision.harness.model.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Field order is significant: it controls the order properties appear in
+ * the BeanOutputConverter-generated JSON schema, which the LLM follows when
+ * emitting structured output. The streaming endpoint ({@code /api/chat/stream})
+ * emits component-completion events in the same order, so the UI can render
+ * textResponse → timelines → table without reshuffling.
+ */
+@JsonPropertyOrder({"textResponse", "timelines", "table", "references"})
 public class ChatResponseData {
     @JsonProperty("textResponse")
     private TextResponse textResponse;

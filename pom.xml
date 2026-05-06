@@ -19,7 +19,17 @@
 
     <properties>
         <java.version>21</java.version>
-        <spring-ai.version>2.0.0-M5</spring-ai.version>
+        <!--
+          Pinned to M4 to avoid the streaming regression introduced in M5.
+          M5 migrated spring-ai-openai to the official openai-java SDK and the
+          new bridge eagerly drains the chat-completion stream via
+          collectList().flatMapMany(), which buffers all tokens before re-emitting
+          them and effectively kills SSE token streaming. M4 still uses Spring
+          AI's WebClient-based OpenAiApi which streams chunks reactively.
+          Bump back to 2.0.0-M6+ once the bridge is fixed (track upstream
+          spring-projects/spring-ai issue #5162).
+        -->
+        <spring-ai.version>2.0.0-M4</spring-ai.version>
     </properties>
 
     <dependencies>
