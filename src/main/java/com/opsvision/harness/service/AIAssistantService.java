@@ -61,10 +61,6 @@ public class AIAssistantService {
 
     private static final Logger log = LoggerFactory.getLogger(AIAssistantService.class);
 
-    private static final ThreadLocal<List<String>> INVOKED_TOOLS =
-            ThreadLocal.withInitial(ArrayList::new);
-    private static final ThreadLocal<UUID> CURRENT_CONVERSATION_ID = new ThreadLocal<>();
-
     private static final String TOOL_CACHE_PREFIX = "tool-result:";
 
     @Autowired
@@ -99,16 +95,15 @@ public class AIAssistantService {
     public ChatResponseData generateStructuredResponse(String userId, String userMessage) {
         MDC.put("userId", userId);
         log.info("Processing structured chat for user '{}': {}", userId, userMessage);
-        INVOKED_TOOLS.get().clear();
+        List<String> invokedTools = Collections.synchronizedList(new ArrayList<>());
         Conversation conversation = null;
 
         try {
             Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
             conversation = persistInitialConversation(session, userMessage);
-            CURRENT_CONVERSATION_ID.set(conversation.getId());
             MDC.put("conversationId", conversation.getId().toString());
 
-            ToolCallback[] callbacks = wrappedCallbacks();
+            ToolCallback[] callbacks = wrappedCallbacks(null, conversation.getId(), invokedTools, userId);
             log.info("ChatClient prompt: session={} conversation={} tools={}",
                     session.getId(), conversation.getId(), callbacks.length);
 
@@ -134,7 +129,7 @@ public class AIAssistantService {
             conversationRepository.save(conversation);
 
             log.info("Chat completed; conversation={} tools={}",
-                    conversation.getId(), INVOKED_TOOLS.get());
+                    conversation.getId(), invokedTools);
             return responseData;
 
         } catch (Exception e) {
@@ -149,14 +144,8 @@ public class AIAssistantService {
             }
             return createFallbackResponse(userMessage, e);
         } finally {
-            INVOKED_TOOLS.remove();
-            CURRENT_CONVERSATION_ID.remove();
             MDC.clear();
         }
-    }
-
-    public List<String> lastInvokedTools() {
-        return Collections.unmodifiableList(INVOKED_TOOLS.get());
     }
 
     /**
@@ -184,16 +173,15 @@ public class AIAssistantService {
 
     private void runStreamInternal(String userId, String userMessage, Sinks.Many<StreamEvent> sink) {
         MDC.put("userId", userId);
-        INVOKED_TOOLS.get().clear();
+        List<String> invokedTools = Collections.synchronizedList(new ArrayList<>());
         Conversation conversation = null;
 
         try {
             Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
             conversation = persistInitialConversation(session, userMessage);
-            CURRENT_CONVERSATION_ID.set(conversation.getId());
             MDC.put("conversationId", conversation.getId().toString());
 
-            ToolCallback[] callbacks = wrappedCallbacks(sink);
+            ToolCallback[] callbacks = wrappedCallbacks(sink, conversation.getId(), invokedTools, userId);
             log.info("Stream prompt: session={} conversation={} tools={}",
                     session.getId(), conversation.getId(), callbacks.length);
 
@@ -211,6 +199,8 @@ public class AIAssistantService {
 
             StringBuilder accumulated = new StringBuilder();
             final Conversation conv = conversation;
+            final String capturedUserId = userId;
+            final String capturedConvId = conversation.getId().toString();
 
             client.prompt()
                     .user(userMessage + "\n\n" + converter.getFormat())
@@ -221,7 +211,7 @@ public class AIAssistantService {
                         accumulated.append(token);
                         sink.tryEmitNext(StreamEvent.assistantToken(token));
                     })
-                    .doOnError(err -> {
+                    .doOnError(err -> withMdc(capturedUserId, capturedConvId, () -> {
                         log.error("Stream error", err);
                         sink.tryEmitNext(StreamEvent.error(err.getMessage()));
                         try {
@@ -230,8 +220,8 @@ public class AIAssistantService {
                         } catch (Exception ignore) {
                             // best effort
                         }
-                    })
-                    .doOnComplete(() -> {
+                    }))
+                    .doOnComplete(() -> withMdc(capturedUserId, capturedConvId, () -> {
                         String fullText = accumulated.toString();
                         ChatResponseData data = null;
                         try {
@@ -255,8 +245,8 @@ public class AIAssistantService {
                             sink.tryEmitNext(StreamEvent.finalResponse(data));
                         }
                         log.info("Stream completed; conversation={} tools={}",
-                                conv.getId(), INVOKED_TOOLS.get());
-                    })
+                                conv.getId(), invokedTools);
+                    }))
                     .doFinally(sig -> sink.tryEmitComplete())
                     .blockLast();
 
@@ -273,10 +263,32 @@ public class AIAssistantService {
             }
             sink.tryEmitComplete();
         } finally {
-            INVOKED_TOOLS.remove();
-            CURRENT_CONVERSATION_ID.remove();
             MDC.clear();
         }
+    }
+
+    /**
+     * Run a small block of code with MDC populated. Used inside Reactor doOn*
+     * callbacks where the thread may differ from the worker that initially set
+     * MDC, so log lines emitted from the callback would otherwise come back
+     * empty for [user=…] [conv=…].
+     */
+    private void withMdc(String userId, String conversationId, Runnable body) {
+        String prevUser = MDC.get("userId");
+        String prevConv = MDC.get("conversationId");
+        if (userId != null) MDC.put("userId", userId);
+        if (conversationId != null) MDC.put("conversationId", conversationId);
+        try {
+            body.run();
+        } finally {
+            restoreMdc("userId", prevUser);
+            restoreMdc("conversationId", prevConv);
+        }
+    }
+
+    private void restoreMdc(String key, String prev) {
+        if (prev == null) MDC.remove(key);
+        else MDC.put(key, prev);
     }
 
     private ChatResponseData createFallbackResponse(String userMessage, Exception error) {
@@ -311,11 +323,10 @@ public class AIAssistantService {
         return llmPrompt;
     }
 
-    private ToolCallback[] wrappedCallbacks() {
-        return wrappedCallbacks(null);
-    }
-
-    private ToolCallback[] wrappedCallbacks(Sinks.Many<StreamEvent> stream) {
+    private ToolCallback[] wrappedCallbacks(Sinks.Many<StreamEvent> stream,
+                                            UUID conversationId,
+                                            List<String> invokedTools,
+                                            String userId) {
         if (mcpToolProvider == null) {
             return new ToolCallback[0];
         }
@@ -325,7 +336,7 @@ public class AIAssistantService {
         }
         ToolCallback[] wrapped = new ToolCallback[raw.length];
         for (int i = 0; i < raw.length; i++) {
-            wrapped[i] = new RecordingToolCallback(raw[i], stream);
+            wrapped[i] = new RecordingToolCallback(raw[i], stream, conversationId, invokedTools, userId);
         }
         return wrapped;
     }
@@ -460,18 +471,32 @@ public class AIAssistantService {
         return root;
     }
 
+    /**
+     * Wraps a single MCP {@link ToolCallback} for one chat turn. Per-request
+     * context (conversation id, invoked-tools accumulator, user id, optional
+     * SSE sink) is injected at construction time rather than read from
+     * ThreadLocals — Reactor schedulers don't propagate ThreadLocal across
+     * thread switches, which previously caused streaming-path tool calls to
+     * silently skip persistence (convId came back null) and lose log MDC.
+     */
     private final class RecordingToolCallback implements ToolCallback {
 
         private final ToolCallback delegate;
         private final Sinks.Many<StreamEvent> stream;
+        private final UUID conversationId;
+        private final List<String> invokedTools;
+        private final String userId;
 
-        RecordingToolCallback(ToolCallback delegate) {
-            this(delegate, null);
-        }
-
-        RecordingToolCallback(ToolCallback delegate, Sinks.Many<StreamEvent> stream) {
+        RecordingToolCallback(ToolCallback delegate,
+                              Sinks.Many<StreamEvent> stream,
+                              UUID conversationId,
+                              List<String> invokedTools,
+                              String userId) {
             this.delegate = delegate;
             this.stream = stream;
+            this.conversationId = conversationId;
+            this.invokedTools = invokedTools;
+            this.userId = userId;
         }
 
         @Override
@@ -481,25 +506,37 @@ public class AIAssistantService {
 
         @Override
         public String call(String toolInput) {
-            return record(toolInput, () -> delegate.call(toolInput));
+            return withMdcReturning(() -> record(toolInput, () -> delegate.call(toolInput)));
         }
 
         @Override
         public String call(String toolInput, ToolContext toolContext) {
-            return record(toolInput, () -> delegate.call(toolInput, toolContext));
+            return withMdcReturning(() -> record(toolInput, () -> delegate.call(toolInput, toolContext)));
+        }
+
+        private String withMdcReturning(Supplier<String> body) {
+            String prevUser = MDC.get("userId");
+            String prevConv = MDC.get("conversationId");
+            if (userId != null) MDC.put("userId", userId);
+            if (conversationId != null) MDC.put("conversationId", conversationId.toString());
+            try {
+                return body.get();
+            } finally {
+                restoreMdc("userId", prevUser);
+                restoreMdc("conversationId", prevConv);
+            }
         }
 
         private String record(String toolInput, Supplier<String> invoke) {
             String name = safeName();
-            INVOKED_TOOLS.get().add(name);
-            UUID convId = CURRENT_CONVERSATION_ID.get();
+            invokedTools.add(name);
             emit(StreamEvent.toolCallStart(name, toolInput));
 
             String cacheKey = cacheKey(name, toolInput);
             String cached = lookupCache(cacheKey);
             if (cached != null) {
                 log.info("MCP tool cache HIT: {} key={}", name, cacheKey);
-                persistToolExecution(convId, name, toolInput, cached, 0,
+                persistToolExecution(conversationId, name, toolInput, cached, 0,
                         ToolExecutionStatus.SUCCESS, "cache-hit");
                 emit(StreamEvent.toolCallEnd(name, 0, "CACHE_HIT", null));
                 return cached;
@@ -512,7 +549,7 @@ public class AIAssistantService {
                 log.info("MCP tool invoked: {} latency_ms={} input={}",
                         name, elapsed, toolInput);
                 storeCache(cacheKey, result);
-                persistToolExecution(convId, name, toolInput, result, elapsed,
+                persistToolExecution(conversationId, name, toolInput, result, elapsed,
                         ToolExecutionStatus.SUCCESS, null);
                 emit(StreamEvent.toolCallEnd(name, elapsed, "SUCCESS", null));
                 if (looksLikeEntityNotFound(result)) {
@@ -524,7 +561,7 @@ public class AIAssistantService {
                 long elapsed = System.currentTimeMillis() - start;
                 log.warn("MCP tool failed: {} latency_ms={} error={}",
                         name, elapsed, e.getMessage());
-                persistToolExecution(convId, name, toolInput, null, elapsed,
+                persistToolExecution(conversationId, name, toolInput, null, elapsed,
                         ToolExecutionStatus.FAILED, e.getMessage());
                 emit(StreamEvent.toolCallEnd(name, elapsed, "FAILED", e.getMessage()));
                 throw e;
