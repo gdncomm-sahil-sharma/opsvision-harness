@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -89,6 +90,9 @@ public class AIAssistantService {
     @Autowired
     @Qualifier("toolResultsTtl")
     private Duration toolResultsTtl;
+
+    @Autowired
+    private CriticalSignalInspector criticalSignalInspector;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -494,6 +498,18 @@ public class AIAssistantService {
                 "double-check that the tool you called accepts that exact input shape. " +
                 "Consider whether a sibling tool matches the input format better, and try once with that " +
                 "tool before reporting 'not found' to the user.]";
+        return appendHintToMcpResult(value, hint);
+    }
+
+    /**
+     * Append a {@code text}-typed hint to an MCP tool result so the LLM
+     * sees it inline with the original payload. Used by both
+     * {@link #augmentNotFoundResult} (empty-payload nudge) and the
+     * {@link CriticalSignalInspector} (must-surface-signal nudge). When
+     * the payload isn't the expected MCP envelope shape, falls back to
+     * a plain-text concatenation rather than dropping the hint.
+     */
+    private String appendHintToMcpResult(String value, String hint) {
         try {
             JsonNode root = objectMapper.readTree(value);
             if (root.isArray()) {
@@ -505,7 +521,7 @@ public class AIAssistantService {
                 return objectMapper.writeValueAsString(arr);
             }
         } catch (Exception e) {
-            log.debug("Failed to augment not-found result: {}", e.getMessage());
+            log.debug("Failed to append hint to MCP result: {}", e.getMessage());
         }
         return value + "\n\n" + hint;
     }
@@ -592,6 +608,14 @@ public class AIAssistantService {
                 persistToolExecution(conversationId, name, toolInput, cached, 0,
                         ToolExecutionStatus.SUCCESS, "cache-hit");
                 emit(StreamEvent.toolCallEnd(name, 0, "CACHE_HIT", null));
+                // Re-run the critical-signal inspector on cache hits — the cached
+                // payload is the same shape the LLM would otherwise see fresh, and
+                // the audit row above captures the unaugmented result.
+                Optional<String> cachedHint = criticalSignalInspector.inspect(name, cached);
+                if (cachedHint.isPresent()) {
+                    log.info("MCP tool '{}' triggered critical-signal nudge (cache-hit path)", name);
+                    return appendHintToMcpResult(cached, cachedHint.get());
+                }
                 return cached;
             }
 
@@ -608,6 +632,11 @@ public class AIAssistantService {
                 if (looksLikeEntityNotFound(result)) {
                     log.info("MCP tool returned empty; appending routing-hint for self-correction: {}", name);
                     return augmentNotFoundResult(result);
+                }
+                Optional<String> criticalHint = criticalSignalInspector.inspect(name, result);
+                if (criticalHint.isPresent()) {
+                    log.info("MCP tool '{}' triggered critical-signal nudge", name);
+                    return appendHintToMcpResult(result, criticalHint.get());
                 }
                 return result;
             } catch (RuntimeException e) {
