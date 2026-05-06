@@ -84,6 +84,43 @@ app:
       # Backed by the conversation table — reads survive app restarts.
       max-messages: 20
 
+# Critical-signal inspector. After every successful MCP tool call, the
+# harness inspects the (unwrapped) JSON response. If a rule matches, an
+# extra "[CRITICAL SIGNAL — chain required]" text node is appended to
+# the result before the LLM sees it — same Loop-1 self-correction
+# pattern as the not-found routing hint. Persistence happens BEFORE
+# augmentation so the tool_execution audit row stays clean.
+#
+# A rule fires when EVERY condition matches. Path is a JSON Pointer
+# evaluated against the unwrapped MCP payload. Supported matchers per
+# condition: exactly one of {equals, empty}.
+#   - equals: <scalar>      compare scalar at path; missing path == false-match
+#   - empty: true|false     true means: missing OR null OR empty array/object/string
+critical-signals:
+  rules:
+    - id: pp-pre-pick-list-no-allocations
+      tool: diagnosePickPackage
+      when:
+        - { path: "/found", equals: true }
+        - { path: "/pickListAllocations", empty: true }
+        - { path: "/signals/isCanceled", equals: false }
+        - { path: "/signals/isRejected", equals: false }
+        - { path: "/signals/isInProblemSolve", equals: false }
+        - { path: "/signals/isAlreadyAssigned", equals: false }
+        - { path: "/signals/isReachedToQc", equals: false }
+        - { path: "/signals/isPickingComplete", equals: false }
+        - { path: "/signals/isCancellationPending", equals: false }
+      hint: |
+        [CRITICAL SIGNAL — chain required]
+        diagnosePickPackage shows 0 pickListAllocations and no
+        terminal / post-pick / problem-solve / already-assigned signals.
+        The PP is NOT moving and the diagnose tool cannot see why —
+        picking_task_request HOLD lives in the movement DB and is only
+        visible via evaluatePickListReadiness (rule no-open-task-requests).
+        Before answering, call evaluatePickListReadiness({"idOrCode":"<this PP code>"})
+        and report what it shows. The "Stuck-in-HOLD" pattern named in
+        your system prompt is the most common cause of this state.
+
 # Resilience4j Circuit Breaker Configuration
 resilience4j:
   circuitbreaker:
