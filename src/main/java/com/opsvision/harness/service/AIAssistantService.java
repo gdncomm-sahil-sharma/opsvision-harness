@@ -199,6 +199,7 @@ public class AIAssistantService {
                     new BeanOutputConverter<>(ChatResponseData.class);
 
             StringBuilder accumulated = new StringBuilder();
+            JsonComponentSplitter splitter = new JsonComponentSplitter(objectMapper);
             final Conversation conv = conversation;
             final String capturedUserId = userId;
             final String capturedConvId = conversation.getId().toString();
@@ -211,6 +212,9 @@ public class AIAssistantService {
                     .doOnNext(token -> {
                         accumulated.append(token);
                         sink.tryEmitNext(StreamEvent.assistantToken(token));
+                        for (StreamEvent componentEvent : splitter.consume(token)) {
+                            sink.tryEmitNext(componentEvent);
+                        }
                     })
                     .doOnError(err -> withMdc(capturedUserId, capturedConvId, () -> {
                         log.error("Stream error", err);
