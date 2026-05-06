@@ -35,6 +35,7 @@ mvnw.cmd
 
 # Claude Code tooling artifacts
 .claude/
+CLAUDE.md
 
 # OS files
 .DS_Store
