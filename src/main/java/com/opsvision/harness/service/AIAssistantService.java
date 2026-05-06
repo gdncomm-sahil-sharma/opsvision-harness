@@ -13,6 +13,7 @@ import com.opsvision.harness.repository.ConversationRepository;
 import com.opsvision.harness.repository.ToolExecutionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -94,6 +95,7 @@ public class AIAssistantService {
     private volatile String llmPrompt;
 
     public ChatResponseData generateStructuredResponse(String userId, String userMessage) {
+        MDC.put("userId", userId);
         log.info("Processing structured chat for user '{}': {}", userId, userMessage);
         INVOKED_TOOLS.get().clear();
         Conversation conversation = null;
@@ -102,6 +104,7 @@ public class AIAssistantService {
             Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
             conversation = persistInitialConversation(session, userMessage);
             CURRENT_CONVERSATION_ID.set(conversation.getId());
+            MDC.put("conversationId", conversation.getId().toString());
 
             ToolCallback[] callbacks = wrappedCallbacks();
             log.info("ChatClient prompt: session={} conversation={} tools={}",
@@ -146,6 +149,7 @@ public class AIAssistantService {
         } finally {
             INVOKED_TOOLS.remove();
             CURRENT_CONVERSATION_ID.remove();
+            MDC.clear();
         }
     }
 
@@ -177,6 +181,7 @@ public class AIAssistantService {
     }
 
     private void runStreamInternal(String userId, String userMessage, Sinks.Many<StreamEvent> sink) {
+        MDC.put("userId", userId);
         INVOKED_TOOLS.get().clear();
         Conversation conversation = null;
 
@@ -184,6 +189,7 @@ public class AIAssistantService {
             Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
             conversation = persistInitialConversation(session, userMessage);
             CURRENT_CONVERSATION_ID.set(conversation.getId());
+            MDC.put("conversationId", conversation.getId().toString());
 
             ToolCallback[] callbacks = wrappedCallbacks(sink);
             log.info("Stream prompt: session={} conversation={} tools={}",
@@ -267,6 +273,7 @@ public class AIAssistantService {
         } finally {
             INVOKED_TOOLS.remove();
             CURRENT_CONVERSATION_ID.remove();
+            MDC.clear();
         }
     }
 

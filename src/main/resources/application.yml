@@ -123,5 +123,5 @@ logging:
     com.opsvision.harness: DEBUG
     org.springframework.ai: DEBUG
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss} [user=%X{userId:-} conv=%X{conversationId:-}] %-5level %logger{30} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] [user=%X{userId:-} conv=%X{conversationId:-}] %-5level %logger{36} - %msg%n"
