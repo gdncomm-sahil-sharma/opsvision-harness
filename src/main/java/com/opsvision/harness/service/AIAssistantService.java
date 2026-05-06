@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.opsvision.harness.exception.ChatNotFoundException;
+import com.opsvision.harness.model.dto.ChatTurnResult;
 import com.opsvision.harness.model.dto.response.ChatResponseData;
 import com.opsvision.harness.model.dto.response.StreamEvent;
 import com.opsvision.harness.model.dto.response.TextResponse;
@@ -92,14 +94,23 @@ public class AIAssistantService {
 
     private volatile String llmPrompt;
 
-    public ChatResponseData generateStructuredResponse(String userId, String userMessage) {
+    public ChatTurnResult generateStructuredResponse(String userId, UUID chatId, String userMessage) {
         MDC.put("userId", userId);
-        log.info("Processing structured chat for user '{}': {}", userId, userMessage);
+        log.info("Processing structured chat for user '{}' chat={}: {}", userId, chatId, userMessage);
         List<String> invokedTools = Collections.synchronizedList(new ArrayList<>());
         Conversation conversation = null;
+        Session session;
 
         try {
-            Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
+            // Resolve the chat first — let ChatNotFoundException bubble out untouched
+            // so the controller advice maps it to 404 (vs. swallowing into a 500 fallback).
+            session = sessionService.getOrCreateChat(userId, chatId, userMessage);
+        } catch (ChatNotFoundException e) {
+            MDC.clear();
+            throw e;
+        }
+
+        try {
             conversation = persistInitialConversation(session, userMessage);
             MDC.put("conversationId", conversation.getId().toString());
 
@@ -131,7 +142,7 @@ public class AIAssistantService {
 
             log.info("Chat completed; conversation={} tools={}",
                     conversation.getId(), invokedTools);
-            return responseData;
+            return new ChatTurnResult(session.getId(), responseData);
 
         } catch (Exception e) {
             log.error("Error processing structured chat", e);
@@ -143,7 +154,7 @@ public class AIAssistantService {
                     log.warn("Failed to persist error response: {}", persistError.getMessage());
                 }
             }
-            return createFallbackResponse(userMessage, e);
+            return new ChatTurnResult(session.getId(), createFallbackResponse(userMessage, e));
         } finally {
             MDC.clear();
         }
@@ -161,24 +172,43 @@ public class AIAssistantService {
      * a {@link Schedulers#boundedElastic()} worker so the controller's reactive
      * thread is not blocked while tools execute and the model streams.
      */
-    public Flux<StreamEvent> streamStructuredResponse(String userId, String userMessage) {
-        log.info("Streaming structured chat for user '{}': {}", userId, userMessage);
+    public Flux<StreamEvent> streamStructuredResponse(String userId, UUID chatId, String userMessage) {
+        log.info("Streaming structured chat for user '{}' chat={}: {}", userId, chatId, userMessage);
         Sinks.Many<StreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
 
-        Mono.fromRunnable(() -> runStreamInternal(userId, userMessage, sink))
+        Mono.fromRunnable(() -> runStreamInternal(userId, chatId, userMessage, sink))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe();
 
         return sink.asFlux();
     }
 
-    private void runStreamInternal(String userId, String userMessage, Sinks.Many<StreamEvent> sink) {
+    private void runStreamInternal(String userId, UUID chatId, String userMessage,
+                                    Sinks.Many<StreamEvent> sink) {
         MDC.put("userId", userId);
         List<String> invokedTools = Collections.synchronizedList(new ArrayList<>());
         Conversation conversation = null;
 
+        Session session;
         try {
-            Session session = sessionService.getOrCreateActiveSession(userId, userMessage);
+            // Resolve the chat first. Within an SSE stream we can't return HTTP 404
+            // cleanly once the response has started, so we surface the failure as a
+            // single error event and complete. Same response shape regardless of
+            // whether the chatId was missing, archived, or owned by a different user.
+            session = sessionService.getOrCreateChat(userId, chatId, userMessage);
+        } catch (ChatNotFoundException e) {
+            log.info("Stream rejected: chat not found ({}) chatId={}", e.getReason(), chatId);
+            sink.tryEmitNext(StreamEvent.error("chat not found (" + e.getReason() + ")"));
+            sink.tryEmitComplete();
+            MDC.clear();
+            return;
+        }
+
+        // First SSE event — the UI needs the resolved chatId immediately so it can
+        // update its store / URL before the first tool or token event lands.
+        sink.tryEmitNext(StreamEvent.chatId(session.getId()));
+
+        try {
             conversation = persistInitialConversation(session, userMessage);
             MDC.put("conversationId", conversation.getId().toString());
 

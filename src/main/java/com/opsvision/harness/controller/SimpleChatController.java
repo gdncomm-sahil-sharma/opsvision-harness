@@ -1,6 +1,7 @@
 package com.opsvision.harness.controller;
 
 import com.opsvision.harness.model.dto.ChatMessage;
+import com.opsvision.harness.model.dto.ChatTurnResult;
 import com.opsvision.harness.model.dto.response.*;
 import com.opsvision.harness.service.AIAssistantService;
 import com.opsvision.harness.service.DynamicMcpService;
@@ -39,34 +40,42 @@ public class SimpleChatController {
     @PostMapping
     public ResponseEntity<StructuredChatResponse> chat(@RequestBody ChatMessage message) {
         try {
-            log.info("📨 Received structured chat message from user: {}", message.getUserId());
+            log.info("📨 Received structured chat message from user: {} chat: {}",
+                    message.getUserId(), message.getChatId());
             log.info("📝 Message content: {}", message.getMessage());
-            
-            ChatResponseData responseData = aiAssistantService.generateStructuredResponse(
-                    message.getUserId(), message.getMessage());
-            
+
+            ChatTurnResult result = aiAssistantService.generateStructuredResponse(
+                    message.getUserId(), message.getChatId(), message.getMessage());
+
             StructuredChatResponse structuredResponse = new StructuredChatResponse(
-                200, 
-                true, 
-                responseData, 
-                System.currentTimeMillis()
+                200,
+                true,
+                result.data(),
+                System.currentTimeMillis(),
+                result.chatId()
             );
-            
-            log.info("✅ Structured chat response generated successfully");
+
+            log.info("✅ Structured chat response generated successfully chat={}", result.chatId());
             return ResponseEntity.ok(structuredResponse);
-            
+
+        } catch (com.opsvision.harness.exception.ChatNotFoundException e) {
+            // Let the global exception handler shape the 404 response — don't
+            // wrap it in StructuredChatResponse (this is a precondition failure,
+            // not an LLM error).
+            throw e;
         } catch (Exception e) {
             log.error("❌ Error processing structured chat message", e);
-            
+
             // Create error response with fallback data
             ChatResponseData errorData = createErrorResponseData(e.getMessage());
             StructuredChatResponse errorResponse = new StructuredChatResponse(
-                500, 
-                false, 
-                errorData, 
-                System.currentTimeMillis()
+                500,
+                false,
+                errorData,
+                System.currentTimeMillis(),
+                message.getChatId()
             );
-            
+
             return ResponseEntity.internalServerError().body(errorResponse);
         }
     }
@@ -80,9 +89,10 @@ public class SimpleChatController {
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<StreamEvent>> chatStream(@RequestBody ChatMessage message) {
-        log.info("📡 Streaming chat request from user: {}", message.getUserId());
+        log.info("📡 Streaming chat request from user: {} chat: {}",
+                message.getUserId(), message.getChatId());
         return aiAssistantService
-                .streamStructuredResponse(message.getUserId(), message.getMessage())
+                .streamStructuredResponse(message.getUserId(), message.getChatId(), message.getMessage())
                 .map(event -> ServerSentEvent.<StreamEvent>builder()
                         .event(event.getType())
                         .data(event)
