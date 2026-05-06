@@ -2,6 +2,7 @@ package com.opsvision.harness.controller;
 
 import com.opsvision.harness.model.dto.ChatMessageDto;
 import com.opsvision.harness.model.dto.ChatSummaryDto;
+import com.opsvision.harness.model.dto.FeedbackRequest;
 import com.opsvision.harness.model.dto.RenameChatRequest;
 import com.opsvision.harness.model.entity.Conversation;
 import com.opsvision.harness.model.entity.Session;
@@ -87,6 +88,27 @@ public class ChatsController {
     public ChatSummaryDto unarchive(@PathVariable UUID chatId,
                                     @RequestParam String userId) {
         return toSummary(sessionService.unarchiveChat(chatId, userId));
+    }
+
+    /**
+     * Submit per-turn user feedback (thumbs up/down + optional comment).
+     * Upserts on resubmit. Returns the updated message DTO so the UI can
+     * swap the row in place. Allowed on archived chats (feedback is read-
+     * side metadata, symmetric with {@code /messages}).
+     */
+    @PostMapping("/{chatId}/messages/{seq}/feedback")
+    public ChatMessageDto feedback(@PathVariable UUID chatId,
+                                   @PathVariable("seq") int sequenceNumber,
+                                   @RequestParam String userId,
+                                   @RequestBody FeedbackRequest body) {
+        if (body == null) {
+            throw new IllegalArgumentException("request body is required");
+        }
+        Conversation updated = sessionService.submitFeedback(
+                chatId, userId, sequenceNumber, body.isHelpful(), body.getComment());
+        log.info("Feedback submitted chat={} seq={} helpful={}",
+                chatId, sequenceNumber, body.isHelpful());
+        return toMessage(updated);
     }
 
     private ChatSummaryDto toSummary(Session s) {

@@ -48,4 +48,9 @@ public interface ConversationRepository extends JpaRepository<Conversation, UUID
      *  the chat has no messages yet (caller falls back to {@code createdAt}). */
     @Query("SELECT MAX(c.createdAt) FROM Conversation c WHERE c.session.id = :sessionId")
     Optional<java.time.LocalDateTime> findLatestCreatedAtForSession(@Param("sessionId") UUID sessionId);
+
+    /** Look up one turn within a chat by its sequence number — used by the
+     *  feedback endpoint to find the target row before upserting helpful /
+     *  feedback_comment. Empty when the seq is out of range for that chat. */
+    Optional<Conversation> findBySessionIdAndSequenceNumber(UUID sessionId, Integer sequenceNumber);
 }

@@ -129,6 +129,41 @@ public class SessionService {
     }
 
     /**
+     * Record per-turn user feedback (thumbs up/down + optional comment).
+     * Upserts the {@code helpful} and {@code feedback_comment} columns on
+     * the targeted {@link Conversation} row — resubmitting overwrites the
+     * prior feedback (no audit history today).
+     *
+     * <p>Allowed for any chat status, including ARCHIVED — feedback is
+     * metadata about a past turn (read-side concern), symmetric with the
+     * {@code /messages} endpoint which is also archive-friendly.
+     *
+     * <p>Comment is trimmed; blank/empty comments are stored as null. Comments
+     * over 2000 chars throw {@link IllegalArgumentException} (mapped to 400).
+     * Out-of-range {@code sequenceNumber} throws
+     * {@link ChatNotFoundException} with reason {@code "turn-not-found"}.
+     */
+    public Conversation submitFeedback(UUID chatId, String userId, int sequenceNumber,
+                                       boolean helpful, String comment) {
+        requireOwnedChatAnyStatus(chatId, userId);
+        if (comment != null && comment.length() > 2000) {
+            throw new IllegalArgumentException("comment must be 2000 characters or fewer");
+        }
+        String trimmedComment = (comment == null || comment.isBlank()) ? null : comment.trim();
+
+        Conversation conv = conversationRepository
+                .findBySessionIdAndSequenceNumber(chatId, sequenceNumber)
+                .orElseThrow(() -> new ChatNotFoundException(chatId, "turn-not-found"));
+
+        conv.setHelpful(helpful);
+        conv.setFeedbackComment(trimmedComment);
+        Conversation saved = conversationRepository.save(conv);
+        log.info("Feedback recorded chat={} seq={} helpful={} commentLen={}",
+                chatId, sequenceNumber, helpful, trimmedComment == null ? 0 : trimmedComment.length());
+        return saved;
+    }
+
+    /**
      * Ownership check that ignores status. Used by read endpoints
      * ({@code /messages}) and lifecycle endpoints (rename, archive, unarchive)
      * where archived chats remain accessible.
