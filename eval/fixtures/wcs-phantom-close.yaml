@@ -1,0 +1,39 @@
+# Question fixtures for the regression-diff harness. Source: the WCS
+# phantom-close investigation transcript at Marunda 2026-05-04, plus the
+# 224143 single-PP-stuck case the critical-signal inspector targets.
+#
+# These are NOT expected-answer fixtures — we don't score "is the answer
+# correct?". The runner records what the harness DID and the diff tool
+# compares it to a prior baseline. Regressions are detected as deltas in
+# objectively-observable fields: tools called, references populated,
+# self-grade flip, and text-similarity drop on summary.
+#
+# Each `single` entry runs as an independent chat (fresh chatId).
+# `flow` entries chain follow-up turns through one chatId.
+
+single:
+  - label: Q1-pl-106641
+    message: "What is pick list 106641?"
+  - label: Q2-223506-inventory
+    message: "For PK/MAR-01/V-2026/223506, are the picking items backed by enough warehouse inventory?"
+  - label: Q3-picker-56108
+    message: "check movement history for picker 56108"
+  - label: Q4-stock-movements-223506
+    message: "Walk me through the stock movements for the items in PK/MAR-01/V-2026/223506."
+  - label: Q5-look-up-pl-223506-mislabel
+    message: "Look up pick list PK/MAR-01/V-2026/223506."
+  - label: Q6-223506-sitting-day
+    message: "PK/MAR-01/V-2026/223506 has been sitting for a day. What's actually going on?"
+  - label: Q7-other-pps-wcs-signature
+    message: "check other PPs from that day with the same WCS signature"
+  - label: Q8-widespread-2026-05-04
+    message: "how widespread is the WCS phantom-close pattern across 2026-05-04?"
+  - label: Q9-224143-single-turn-hold
+    message: "Why isn't picking moving on PK/MAR-01/V-2026/224143?"
+
+flow:
+  - label: F1-224143-reconcile-trace
+    turns:
+      - "Why isn't picking moving on PK/MAR-01/V-2026/224143?"
+      - "yes — run reconcile"
+      - "yes — pull the stock trace"
