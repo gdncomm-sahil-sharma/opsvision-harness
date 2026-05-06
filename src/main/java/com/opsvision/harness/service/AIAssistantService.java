@@ -2,6 +2,8 @@ package com.opsvision.harness.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.opsvision.harness.model.dto.response.ChatResponseData;
 import com.opsvision.harness.model.dto.response.StreamEvent;
 import com.opsvision.harness.model.dto.response.TextResponse;
@@ -408,6 +410,42 @@ public class AIAssistantService {
         }
     }
 
+    /**
+     * Loop-1 self-correction nudge: when an MCP tool returns an "entity not found"
+     * payload, append a generic routing hint to the result before handing it back
+     * to the LLM. This lets the model retry within the same tool-calling loop
+     * (e.g. realize {@code getPickList(223506)} on a PP-shaped input was wrong and
+     * try {@code getPickPackage} instead) rather than reporting "not found" to the
+     * user. Generic across every tool — no per-tool wiring.
+     *
+     * The hint is added as an extra MCP {@code text} content item alongside the
+     * raw result, so the original tool output is still readable and the audit
+     * trail stored in {@code tool_execution.result} captures the unmodified MCP
+     * response (we persist before augmenting).
+     */
+    private String augmentNotFoundResult(String value) {
+        String hint = "[ROUTING HINT: this tool returned no matching data. If the user's input contained " +
+                "an identifier whose format could match multiple tool inputs (e.g. a code like " +
+                "PK/MAR-01/V-2026/123456 vs a numeric pick_list.id, or a SKU vs a barcode), " +
+                "double-check that the tool you called accepts that exact input shape. " +
+                "Consider whether a sibling tool matches the input format better, and try once with that " +
+                "tool before reporting 'not found' to the user.]";
+        try {
+            JsonNode root = objectMapper.readTree(value);
+            if (root.isArray()) {
+                ArrayNode arr = (ArrayNode) root;
+                ObjectNode hintNode = objectMapper.createObjectNode();
+                hintNode.put("type", "text");
+                hintNode.put("text", hint);
+                arr.add(hintNode);
+                return objectMapper.writeValueAsString(arr);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to augment not-found result: {}", e.getMessage());
+        }
+        return value + "\n\n" + hint;
+    }
+
     private JsonNode unwrapMcpEnvelope(JsonNode root) {
         if (root.isArray() && !root.isEmpty()) {
             JsonNode first = root.get(0);
@@ -477,6 +515,10 @@ public class AIAssistantService {
                 persistToolExecution(convId, name, toolInput, result, elapsed,
                         ToolExecutionStatus.SUCCESS, null);
                 emit(StreamEvent.toolCallEnd(name, elapsed, "SUCCESS", null));
+                if (looksLikeEntityNotFound(result)) {
+                    log.info("MCP tool returned empty; appending routing-hint for self-correction: {}", name);
+                    return augmentNotFoundResult(result);
+                }
                 return result;
             } catch (RuntimeException e) {
                 long elapsed = System.currentTimeMillis() - start;
