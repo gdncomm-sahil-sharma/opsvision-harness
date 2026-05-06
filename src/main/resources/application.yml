@@ -78,6 +78,11 @@ app:
     default-ttl: 4h
   cache:
     tool-results-ttl: 30m
+  chat:
+    memory:
+      # Max messages (user + assistant) replayed into the LLM as prior context.
+      # Backed by the conversation table — reads survive app restarts.
+      max-messages: 20
 
 # Resilience4j Circuit Breaker Configuration
 resilience4j:

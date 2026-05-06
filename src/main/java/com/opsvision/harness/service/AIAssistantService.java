@@ -126,6 +126,7 @@ public class AIAssistantService {
                     ? responseData.getTextResponse().getSummary()
                     : "(no summary)";
             conversation.setResponse(summary);
+            conversation.setContextData(referencesAsJson(responseData));
             conversationRepository.save(conversation);
 
             log.info("Chat completed; conversation={} tools={}",
@@ -237,6 +238,7 @@ public class AIAssistantService {
                                     : "(no summary)";
                             try {
                                 conv.setResponse(summary);
+                                conv.setContextData(referencesAsJson(data));
                                 conversationRepository.save(conv);
                             } catch (Exception persistError) {
                                 log.warn("Failed to persist streaming conversation: {}",
@@ -339,6 +341,18 @@ public class AIAssistantService {
             wrapped[i] = new RecordingToolCallback(raw[i], stream, conversationId, invokedTools, userId);
         }
         return wrapped;
+    }
+
+    private JsonNode referencesAsJson(ChatResponseData data) {
+        if (data == null || data.getReferences() == null || data.getReferences().isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.valueToTree(data.getReferences());
+        } catch (Exception e) {
+            log.debug("Failed to serialize references for context_data: {}", e.getMessage());
+            return null;
+        }
     }
 
     private JsonNode parseJsonOrNull(String json) {
