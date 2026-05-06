@@ -94,6 +94,18 @@ public class AIAssistantService {
     @Autowired
     private CriticalSignalInspector criticalSignalInspector;
 
+    @Autowired
+    private TokenCostCalculator tokenCostCalculator;
+
+    @Autowired(required = false)
+    private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+
+    @Autowired
+    private StrictResponseFormatFactory responseFormatFactory;
+
+    @Autowired
+    private QuestionRouter questionRouter;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile String llmPrompt;
@@ -131,11 +143,25 @@ public class AIAssistantService {
                     .defaultAdvisors(memoryAdvisor)
                     .build();
 
-            ChatResponseData responseData = client.prompt()
-                    .user(userMessage)
-                    .toolCallbacks(callbacks)
-                    .call()
-                    .entity(ChatResponseData.class);
+            String routedMessage = applyRoutingHint(userMessage);
+
+            org.springframework.ai.chat.client.ChatClient.ChatClientRequestSpec requestSpec =
+                    client.prompt()
+                            .user(routedMessage)
+                            .toolCallbacks(callbacks);
+            org.springframework.ai.openai.api.ResponseFormat rf = responseFormatFactory.get();
+            if (rf != null) {
+                requestSpec = requestSpec.options(
+                        org.springframework.ai.openai.OpenAiChatOptions.builder()
+                                .responseFormat(rf)
+                                .build());
+            }
+            org.springframework.ai.chat.client.ResponseEntity<
+                    org.springframework.ai.chat.model.ChatResponse, ChatResponseData> entityResponse =
+                    requestSpec.call().responseEntity(ChatResponseData.class);
+
+            ChatResponseData responseData = entityResponse.entity();
+            applyUsageMetadata(conversation, entityResponse.response());
 
             String summary = (responseData != null && responseData.getTextResponse() != null)
                     ? responseData.getTextResponse().getSummary()
@@ -241,9 +267,20 @@ public class AIAssistantService {
             final String capturedUserId = userId;
             final String capturedConvId = conversation.getId().toString();
 
-            client.prompt()
-                    .user(userMessage + "\n\n" + converter.getFormat())
-                    .toolCallbacks(callbacks)
+            String routedStreamMessage = applyRoutingHint(userMessage) + "\n\n" + converter.getFormat();
+
+            org.springframework.ai.chat.client.ChatClient.ChatClientRequestSpec streamSpec =
+                    client.prompt()
+                            .user(routedStreamMessage)
+                            .toolCallbacks(callbacks);
+            org.springframework.ai.openai.api.ResponseFormat streamRf = responseFormatFactory.get();
+            if (streamRf != null) {
+                streamSpec = streamSpec.options(
+                        org.springframework.ai.openai.OpenAiChatOptions.builder()
+                                .responseFormat(streamRf)
+                                .build());
+            }
+            streamSpec
                     .stream()
                     .content()
                     .doOnNext(token -> {
@@ -282,6 +319,12 @@ public class AIAssistantService {
                                 conv.setContextData(referencesAsJson(data));
                                 conv.setAnswered(data.getAnswered());
                                 conv.setUnansweredReason(data.getUnansweredReason());
+                                // TODO: streaming-path token usage capture is non-trivial in
+                                // Spring AI 2.0.0-M4 — OpenAI requires
+                                // stream_options.include_usage=true and the metadata only
+                                // arrives on the final chunk. The call path already
+                                // captures it; the stream path gets NULL token columns
+                                // until we wire OpenAiChatOptions for include_usage.
                                 conversationRepository.save(conv);
                             } catch (Exception persistError) {
                                 log.warn("Failed to persist streaming conversation: {}",
@@ -491,6 +534,76 @@ public class AIAssistantService {
      * trail stored in {@code tool_execution.result} captures the unmodified MCP
      * response (we persist before augmenting).
      */
+    /**
+     * Run the user message through the question pre-classifier and, if
+     * any rules matched, prepend a "[ROUTING HINTS]" block to the
+     * message so the LLM sees the hints alongside the question. Falls
+     * through to the original message when nothing matches.
+     */
+    private String applyRoutingHint(String userMessage) {
+        String hintBlock = questionRouter.routeMessage(userMessage);
+        if (hintBlock == null) return userMessage;
+        return hintBlock + userMessage;
+    }
+
+    /**
+     * Increment a Micrometer counter, no-op if no MeterRegistry bean is
+     * present (e.g. tests that don't pull in actuator). Tags are passed
+     * as alternating key/value strings.
+     */
+    private void incrementCounter(String name, String... tags) {
+        if (meterRegistry == null) return;
+        try {
+            meterRegistry.counter(name, tags).increment();
+        } catch (Exception e) {
+            log.debug("Counter increment failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Record a per-tool latency observation as a Micrometer Timer (which
+     * Prometheus scrapes as p50/p95/p99 when histogram percentiles are
+     * configured). {@code outcome} is "success" or "failure".
+     */
+    private void recordToolLatency(String tool, String outcome, long elapsedMs) {
+        if (meterRegistry == null) return;
+        try {
+            io.micrometer.core.instrument.Timer.builder("mcp.tool.latency")
+                    .tag("tool", tool)
+                    .tag("outcome", outcome)
+                    .publishPercentiles(0.5, 0.95, 0.99)
+                    .register(meterRegistry)
+                    .record(elapsedMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            log.debug("Timer record failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Pulls token usage and model id off a {@code ChatResponse} and writes
+     * them onto the conversation row alongside a harness-computed cost.
+     * Best-effort: missing metadata leaves columns NULL rather than
+     * failing the persistence path.
+     */
+    private void applyUsageMetadata(Conversation conversation,
+                                    org.springframework.ai.chat.model.ChatResponse cr) {
+        if (cr == null || cr.getMetadata() == null) return;
+        org.springframework.ai.chat.metadata.ChatResponseMetadata md = cr.getMetadata();
+        if (md.getModel() != null) conversation.setModel(md.getModel());
+        org.springframework.ai.chat.metadata.Usage usage = md.getUsage();
+        if (usage == null) return;
+        Integer prompt = usage.getPromptTokens();
+        Integer completion = usage.getCompletionTokens();
+        Integer total = usage.getTotalTokens();
+        conversation.setPromptTokens(prompt);
+        conversation.setCompletionTokens(completion);
+        conversation.setTotalTokens(total);
+        java.math.BigDecimal cost = tokenCostCalculator.compute(md.getModel(), prompt, completion);
+        if (cost != null) conversation.setCostUsd(cost);
+        log.info("LLM usage: model={} prompt={} completion={} total={} cost_usd={}",
+                md.getModel(), prompt, completion, total, cost);
+    }
+
     private String augmentNotFoundResult(String value) {
         String hint = "[ROUTING HINT: this tool returned no matching data. If the user's input contained " +
                 "an identifier whose format could match multiple tool inputs (e.g. a code like " +
@@ -605,6 +718,7 @@ public class AIAssistantService {
             String cached = lookupCache(cacheKey);
             if (cached != null) {
                 log.info("MCP tool cache HIT: {} key={}", name, cacheKey);
+                incrementCounter("mcp.cache", "tool", name, "outcome", "hit");
                 persistToolExecution(conversationId, name, toolInput, cached, 0,
                         ToolExecutionStatus.SUCCESS, "cache-hit");
                 emit(StreamEvent.toolCallEnd(name, 0, "CACHE_HIT", null));
@@ -618,6 +732,7 @@ public class AIAssistantService {
                 }
                 return cached;
             }
+            incrementCounter("mcp.cache", "tool", name, "outcome", "miss");
 
             long start = System.currentTimeMillis();
             try {
@@ -625,6 +740,7 @@ public class AIAssistantService {
                 long elapsed = System.currentTimeMillis() - start;
                 log.info("MCP tool invoked: {} latency_ms={} input={}",
                         name, elapsed, toolInput);
+                recordToolLatency(name, "success", elapsed);
                 storeCache(cacheKey, result);
                 persistToolExecution(conversationId, name, toolInput, result, elapsed,
                         ToolExecutionStatus.SUCCESS, null);
@@ -643,6 +759,7 @@ public class AIAssistantService {
                 long elapsed = System.currentTimeMillis() - start;
                 log.warn("MCP tool failed: {} latency_ms={} error={}",
                         name, elapsed, e.getMessage());
+                recordToolLatency(name, "failure", elapsed);
                 persistToolExecution(conversationId, name, toolInput, null, elapsed,
                         ToolExecutionStatus.FAILED, e.getMessage());
                 emit(StreamEvent.toolCallEnd(name, elapsed, "FAILED", e.getMessage()));

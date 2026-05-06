@@ -28,18 +28,29 @@ import java.util.UUID;
  * passed by Spring AI is the chat session's UUID — same key as
  * {@code MessageChatMemoryAdvisor.conversationId(session.getId().toString())}.
  *
+ * <p>Replay sizing — two caps, both applied:
+ * <ol>
+ *   <li>{@code app.chat.memory.max-messages} — hard cap on raw turn count
+ *       (preserves the original config knob).</li>
+ *   <li>{@code app.chat.memory.max-tokens} — soft cap on context size.
+ *       The replay walks newest-first, accumulates a cheap char/4 token
+ *       estimate, and drops any tail that would overflow the budget. This
+ *       matters more than message count because a single turn with a 10-row
+ *       table replayed verbatim is several long messages' worth of tokens.</li>
+ * </ol>
+ *
+ * <p>Replay format: each prior turn renders as a structured assistant
+ * message that clearly separates self-grade, references, and prose.
+ * Earlier versions concatenated the references map as raw JSON before the
+ * summary; newer versions tag the line so the LLM can parse the structure
+ * if it wants to ("[refs] {...}\n[answered] true\n<summary>").
+ *
  * <p>{@link #saveAll} is intentionally a no-op: persistence is owned by
  * {@code AIAssistantService}, which writes a complete {@link Conversation}
  * (query, response summary, {@code references} → {@code context_data}) at
  * the end of each turn. Letting the advisor double-write would create drift
  * — two writers, two truths. Reads come from the same rows. Don't "fix"
  * this to call {@code save}; the asymmetry is the design.
- *
- * <p>If a prior turn produced {@code references} (key identifiers like a
- * pickPackage code or stock-trace UUID), they are prepended to the
- * {@link AssistantMessage} content as {@code "[Prior turn references: {...}]"}
- * so the LLM can ground follow-ups on the actual identifiers rather than
- * fabricating from prose.
  */
 @Component
 public class JpaChatMemoryRepository implements ChatMemoryRepository {
@@ -48,11 +59,14 @@ public class JpaChatMemoryRepository implements ChatMemoryRepository {
 
     private final ConversationRepository conversationRepository;
     private final int maxTurns;
+    private final int maxTokens;
 
     public JpaChatMemoryRepository(ConversationRepository conversationRepository,
-                                   @Value("${app.chat.memory.max-messages:20}") int maxMessages) {
+                                   @Value("${app.chat.memory.max-messages:20}") int maxMessages,
+                                   @Value("${app.chat.memory.max-tokens:4000}") int maxTokens) {
         this.conversationRepository = conversationRepository;
         this.maxTurns = Math.max(1, maxMessages / 2);
+        this.maxTokens = Math.max(500, maxTokens);
     }
 
     @Override
@@ -69,14 +83,34 @@ public class JpaChatMemoryRepository implements ChatMemoryRepository {
             return Collections.emptyList();
         }
 
-        List<Message> out = new ArrayList<>(recentDesc.size() * 2);
-        for (int i = recentDesc.size() - 1; i >= 0; i--) {
-            Conversation c = recentDesc.get(i);
+        // Token-budget walk: drop oldest turns first if we'd overflow.
+        // recentDesc is newest-first; we accumulate forward and keep a
+        // prefix of newest turns whose total stays under budget.
+        List<Conversation> kept = new ArrayList<>(recentDesc.size());
+        int tokenAcc = 0;
+        for (Conversation c : recentDesc) {
+            int turnTokens = estimateTokens(c.getQuery())
+                    + estimateTokens(buildAssistantContent(c));
+            if (!kept.isEmpty() && tokenAcc + turnTokens > maxTokens) break;
+            kept.add(c);
+            tokenAcc += turnTokens;
+        }
+
+        List<Message> out = new ArrayList<>(kept.size() * 2);
+        for (int i = kept.size() - 1; i >= 0; i--) {
+            Conversation c = kept.get(i);
             out.add(new UserMessage(c.getQuery()));
             out.add(new AssistantMessage(buildAssistantContent(c)));
         }
-        log.debug("Memory replay session={} turns={} messages={}",
-                sessionId, recentDesc.size(), out.size());
+
+        if (kept.size() < recentDesc.size()) {
+            log.info("Memory replay session={} turns={}/{} messages={} est_tokens={} (token-cap dropped {} oldest)",
+                    sessionId, kept.size(), recentDesc.size(), out.size(), tokenAcc,
+                    recentDesc.size() - kept.size());
+        } else {
+            log.debug("Memory replay session={} turns={} messages={} est_tokens={}",
+                    sessionId, kept.size(), out.size(), tokenAcc);
+        }
         return out;
     }
 
@@ -97,13 +131,39 @@ public class JpaChatMemoryRepository implements ChatMemoryRepository {
         // or hard-delete conversation rows — both have audit implications.
     }
 
+    /**
+     * Build the assistant-side content the LLM sees on replay. Structured
+     * tagging — refs / answered / summary on separate lines — so the model
+     * can parse the prior turn's identifiers without confusing them with
+     * prose.
+     */
     private String buildAssistantContent(Conversation c) {
-        String response = c.getResponse() == null ? "" : c.getResponse();
+        String summary = c.getResponse() == null ? "" : c.getResponse();
+        StringBuilder sb = new StringBuilder();
         JsonNode refs = c.getContextData();
-        if (refs == null || refs.isNull() || refs.isEmpty()) {
-            return response;
+        if (refs != null && !refs.isNull() && !refs.isEmpty()) {
+            sb.append("[refs] ").append(refs.toString()).append('\n');
         }
-        return "[Prior turn references: " + refs.toString() + "]\n" + response;
+        if (Boolean.FALSE.equals(c.getAnswered())) {
+            sb.append("[answered] false");
+            if (c.getUnansweredReason() != null && !c.getUnansweredReason().isBlank()) {
+                sb.append(" — ").append(c.getUnansweredReason());
+            }
+            sb.append('\n');
+        }
+        sb.append(summary);
+        return sb.toString();
+    }
+
+    /**
+     * Cheap token estimate. OpenAI's BPE tokenizer averages roughly 4
+     * characters per token for English; we use that as an approximation
+     * to avoid a tokenizer dependency on the read path. Off by 10-20% is
+     * acceptable here — this is a budget guard, not billing.
+     */
+    private int estimateTokens(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        return Math.max(1, s.length() / 4);
     }
 
     private UUID parseUuidOrNull(String s) {

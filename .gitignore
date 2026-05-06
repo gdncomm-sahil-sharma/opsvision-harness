@@ -37,6 +37,11 @@ mvnw.cmd
 .claude/
 CLAUDE.md
 
+# Per-run regression-eval artifacts. The runner + fixtures + diff tool
+# under eval/ are tracked; eval/results/ holds timestamped JSON outputs
+# that aren't worth committing.
+eval/results/
+
 # OS files
 .DS_Store
 .DS_Store?

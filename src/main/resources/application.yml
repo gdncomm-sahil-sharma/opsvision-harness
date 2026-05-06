@@ -83,6 +83,48 @@ app:
       # Max messages (user + assistant) replayed into the LLM as prior context.
       # Backed by the conversation table — reads survive app restarts.
       max-messages: 20
+      # Soft cap on replay context size in tokens (cheap char/4 estimate).
+      # When the per-turn cumulative estimate would exceed this, the oldest
+      # turns drop until the prefix fits. Bigger than the call's natural
+      # context to leave room for the system prompt + tool descriptions +
+      # current message.
+      max-tokens: 4000
+    # OpenAI response_format mode for the final assistant message.
+    #   json-object         OpenAI guarantees valid JSON (closes braces);
+    #                       no schema enforcement. Default. Eliminates the
+    #                       Q8-class missing-brace failure mode.
+    #   json-schema-strict  Server-side schema enforcement against
+    #                       ChatResponseData. Requires the DTO to be free
+    #                       of Map<String,Object> / List<List<Object>>; off
+    #                       by default for that reason.
+    #   text                No response_format. Falls back to prompt-coaxed
+    #                       schema (the M4 baseline). Use if json-object
+    #                       causes regressions.
+    output-format: json-object
+  # Per-model cost rates, USD per 1,000 tokens. Keys are model-id prefixes;
+  # longest-prefix-match wins, so versioned model ids (gpt-5.4-mini-2026-04-12)
+  # match against gpt-5.4-mini without per-version updates. Missing model ⇒
+  # null cost on the conversation row (no rolled-in zero).
+  # Source: OpenAI public pricing as of 2026-05.
+  #
+  # NOTE: Spring Boot's relaxed binder splits dots in property keys into
+  # nested map paths, so a key like `gpt-5.4-mini` becomes
+  # `gpt-5` → `4-mini` and silently fails to bind. Use `[...]` brackets
+  # to keep the literal key intact.
+  token-cost:
+    rates:
+      "[gpt-5.4-mini]":
+        input-usd-per-1k: 0.00015
+        output-usd-per-1k: 0.0006
+      "[gpt-5]":
+        input-usd-per-1k: 0.0025
+        output-usd-per-1k: 0.01
+      "[gpt-4o-mini]":
+        input-usd-per-1k: 0.00015
+        output-usd-per-1k: 0.0006
+      "[gpt-4o]":
+        input-usd-per-1k: 0.0025
+        output-usd-per-1k: 0.01
 
 # Critical-signal inspector. After every successful MCP tool call, the
 # harness inspects the (unwrapped) JSON response. If a rule matches, an
@@ -96,6 +138,56 @@ app:
 # condition: exactly one of {equals, empty}.
 #   - equals: <scalar>      compare scalar at path; missing path == false-match
 #   - empty: true|false     true means: missing OR null OR empty array/object/string
+# Question pre-classifier router. Regex rules matched against the user
+# message; matching rules' hints are injected as a "[ROUTING HINTS]"
+# block prepended to the system prompt for that turn. Input-side
+# counterpart to critical-signals (output-side).
+question-router:
+  rules:
+    - id: pp-code-mislabeled-as-pick-list
+      pattern: '(?i)\bpick\s+list\s+PK/'
+      hint: |
+        The message says "pick list" but the trailing identifier is shaped
+        like a pick package code (PK/<SITE>-01/<ROMAN>-<YEAR>/<SEQ>). Do
+        NOT call getPickList — call diagnosePickPackage with the full
+        code. Cite the correction in textResponse.bullets so the user's
+        mental model is updated.
+    - id: pp-code-detected
+      pattern: '\bPK/[A-Z]+-\d+/[IVXLC]+-\d{4}/\d+\b'
+      hint: |
+        A pick package code is in the message. Primary entry point:
+        diagnosePickPackage. The trailing 7-digit segment is a per-PP
+        sequence — it is NEVER a pick_list.id.
+    - id: picker-code-detected
+      pattern: '\bPIC-\d{10}\b'
+      hint: |
+        A picker code (PIC-NNNNNNNNNN) is in the message. Primary entry
+        point: diagnosePickerQueue with pickerCodeOrId set to this exact
+        code.
+    - id: picker-numeric-id-shorthand
+      pattern: '(?i)\bpicker\s+\d{1,8}\b'
+      hint: |
+        The user wrote "picker N" with a numeric id (the picker_id from
+        the DB, not the picker_code). Map it: zero-pad to 10 digits and
+        prefix with "PIC-" to form the picker_code (e.g. picker 56108 →
+        PIC-0000056108), then call diagnosePickerQueue with that code.
+        Don't call getMovementHistory with the bare number — that tool
+        does not index by picker_id.
+    - id: bulk-pattern-survey
+      pattern: '(?i)widespread|same\s+WCS\b|all\s+PPs|other\s+PPs|across\s+\d{4}-\d{2}-\d{2}|how\s+many\s+(?:other|more)'
+      hint: |
+        Bulk pattern survey. Use findPickingTasks (phantomClose=true for
+        WCS-fingerprint scans) or findPickingTaskRequests (status=HOLD
+        for stuck-request surveys) with a date window. Report a count
+        plus a small sample, never enumerate all rows.
+    - id: order-item-id-shape
+      pattern: '\b\d{8,10}/\d{1,3}\b'
+      hint: |
+        An order_item_id (NNNNNNNN/NN shape) is in the message. Start
+        with getSalesOrder using orderItemId — its response surfaces
+        parentPickPackage.code which you then chain into
+        diagnosePickPackage if needed.
+
 critical-signals:
   rules:
     - id: pp-pre-pick-list-no-allocations
