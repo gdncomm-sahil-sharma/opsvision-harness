@@ -8,7 +8,9 @@ import com.opsvision.harness.exception.ChatNotFoundException;
 import com.opsvision.harness.model.dto.ChatTurnResult;
 import com.opsvision.harness.model.dto.response.ChatResponseData;
 import com.opsvision.harness.model.dto.response.StreamEvent;
+import com.opsvision.harness.model.dto.response.Table;
 import com.opsvision.harness.model.dto.response.TextResponse;
+import com.opsvision.harness.model.dto.response.Timeline;
 import com.opsvision.harness.model.entity.Conversation;
 import com.opsvision.harness.model.entity.Session;
 import com.opsvision.harness.model.entity.ToolExecution;
@@ -165,6 +167,7 @@ public class AIAssistantService {
 
             ChatResponseData responseData = entityResponse.entity();
             timelineDateRepairer.repair(responseData);
+            stripEmptyComponents(responseData);
             applyUsageMetadata(conversation, entityResponse.response());
 
             String summary = (responseData != null && responseData.getTextResponse() != null)
@@ -317,6 +320,7 @@ public class AIAssistantService {
                         }
                         if (data != null) {
                             timelineDateRepairer.repair(data);
+                            stripEmptyComponents(data);
                             String summary = data.getTextResponse() != null
                                     ? data.getTextResponse().getSummary()
                                     : "(no summary)";
@@ -434,6 +438,26 @@ public class AIAssistantService {
             wrapped[i] = new RecordingToolCallback(raw[i], stream, conversationId, invokedTools, userId);
         }
         return wrapped;
+    }
+
+    /**
+     * Drop empty {@code timelines} and {@code table} so the wire format omits
+     * them entirely (paired with {@code @JsonInclude(NON_NULL)} on the DTO
+     * fields). Empty shells from the LLM — {@code timelines:{data:[]}} or
+     * {@code table:{headers:[],data:[]}} — render as broken UI components;
+     * a missing field renders as nothing, which is what we want for
+     * conversational, off-scope, and "no rows found" answers.
+     */
+    private void stripEmptyComponents(ChatResponseData data) {
+        if (data == null) return;
+        Timeline t = data.getTimelines();
+        if (t == null || t.getData() == null || t.getData().isEmpty()) {
+            data.setTimelines(null);
+        }
+        Table tbl = data.getTable();
+        if (tbl == null || tbl.getData() == null || tbl.getData().isEmpty()) {
+            data.setTable(null);
+        }
     }
 
     private JsonNode referencesAsJson(ChatResponseData data) {
