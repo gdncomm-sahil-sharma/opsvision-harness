@@ -106,6 +106,9 @@ public class AIAssistantService {
     @Autowired
     private QuestionRouter questionRouter;
 
+    @Autowired
+    private TimelineDateRepairer timelineDateRepairer;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile String llmPrompt;
@@ -161,6 +164,7 @@ public class AIAssistantService {
                     requestSpec.call().responseEntity(ChatResponseData.class);
 
             ChatResponseData responseData = entityResponse.entity();
+            timelineDateRepairer.repair(responseData);
             applyUsageMetadata(conversation, entityResponse.response());
 
             String summary = (responseData != null && responseData.getTextResponse() != null)
@@ -311,6 +315,7 @@ public class AIAssistantService {
                                     "structured-output parse failed: " + parseError.getMessage()));
                         }
                         if (data != null) {
+                            timelineDateRepairer.repair(data);
                             String summary = data.getTextResponse() != null
                                     ? data.getTextResponse().getSummary()
                                     : "(no summary)";
