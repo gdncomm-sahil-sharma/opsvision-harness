@@ -20,9 +20,11 @@ public class ChatResponseData {
     private TextResponse textResponse;
 
     @JsonProperty("timelines")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private Timeline timelines;
 
     @JsonProperty("table")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private Table table;
 
     /**
