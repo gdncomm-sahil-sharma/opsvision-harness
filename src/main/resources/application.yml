@@ -82,13 +82,13 @@ app:
     memory:
       # Max messages (user + assistant) replayed into the LLM as prior context.
       # Backed by the conversation table — reads survive app restarts.
-      max-messages: 20
+      max-messages: 50
       # Soft cap on replay context size in tokens (cheap char/4 estimate).
       # When the per-turn cumulative estimate would exceed this, the oldest
       # turns drop until the prefix fits. Bigger than the call's natural
       # context to leave room for the system prompt + tool descriptions +
       # current message.
-      max-tokens: 4000
+      max-tokens: 16000
     # OpenAI response_format mode for the final assistant message.
     #   json-object         OpenAI guarantees valid JSON (closes braces);
     #                       no schema enforcement. Default. Eliminates the
