@@ -1,0 +1,12 @@
+-- Persist the full ChatResponseData per turn so the chat history endpoint
+-- can return the same shape the UI saw when the turn was live (bullets,
+-- timelines, table — not just the summary). Before this column the
+-- conversation.response field captured only summary text, leaving the
+-- /api/chats/{id}/messages endpoint to return a flattened version of
+-- each turn.
+--
+-- Nullable because (a) error rows have no structured data, and (b) the
+-- streaming path can't always assemble ChatResponseData when parse
+-- fails mid-stream. The endpoint falls back to the legacy {response,
+-- references} pair when this column is null.
+ALTER TABLE conversation ADD COLUMN response_data JSONB;

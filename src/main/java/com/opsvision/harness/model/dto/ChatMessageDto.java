@@ -1,7 +1,6 @@
 package com.opsvision.harness.model.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.LocalDateTime;
 
@@ -24,7 +23,25 @@ public class ChatMessageDto {
     private int sequence;
     private String query;
     private String response;
-    private JsonNode references;
+    /**
+     * Full structured response (textResponse, timelines, table, references,
+     * answered, unansweredReason) — same shape the UI received when the
+     * turn was live. Null on error rows and on streaming turns whose
+     * final parse failed; clients should fall back to {@link #response}
+     * (summary) and {@link #references} in those cases.
+     *
+     * <p>Typed as {@link Object} (a {@code Map<String, Object>} at runtime)
+     * rather than {@code JsonNode} so the response serialiser doesn't
+     * matter — Spring Boot 4.0.6 ships {@code tools.jackson.databind} 3.x
+     * for HTTP response serialisation, which doesn't recognise the 2.x
+     * {@code com.fasterxml.jackson.databind.JsonNode} as a JSON tree and
+     * falls back to bean introspection (emitting bean properties like
+     * {@code array:false, bigDecimal:false, ...} instead of the actual
+     * tree). Converting to a plain {@code Map} at the controller
+     * boundary sidesteps the version mismatch.
+     */
+    private Object responseData;
+    private Object references;
     private LocalDateTime createdAt;
     private Boolean answered;
     private String unansweredReason;
@@ -34,12 +51,14 @@ public class ChatMessageDto {
     public ChatMessageDto() {}
 
     public ChatMessageDto(int sequence, String query, String response,
-                          JsonNode references, LocalDateTime createdAt,
+                          Object responseData,
+                          Object references, LocalDateTime createdAt,
                           Boolean answered, String unansweredReason,
                           Boolean helpful, String feedbackComment) {
         this.sequence = sequence;
         this.query = query;
         this.response = response;
+        this.responseData = responseData;
         this.references = references;
         this.createdAt = createdAt;
         this.answered = answered;
@@ -57,8 +76,11 @@ public class ChatMessageDto {
     public String getResponse() { return response; }
     public void setResponse(String response) { this.response = response; }
 
-    public JsonNode getReferences() { return references; }
-    public void setReferences(JsonNode references) { this.references = references; }
+    public Object getResponseData() { return responseData; }
+    public void setResponseData(Object responseData) { this.responseData = responseData; }
+
+    public Object getReferences() { return references; }
+    public void setReferences(Object references) { this.references = references; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
