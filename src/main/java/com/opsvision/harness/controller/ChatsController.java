@@ -1,5 +1,7 @@
 package com.opsvision.harness.controller;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opsvision.harness.model.dto.ChatMessageDto;
 import com.opsvision.harness.model.dto.ChatSummaryDto;
 import com.opsvision.harness.model.dto.FeedbackRequest;
@@ -38,6 +40,8 @@ public class ChatsController {
 
     @Autowired
     private ConversationRepository conversationRepository;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * Sidebar list. Defaults to {@code status=ACTIVE}; pass {@code status=ARCHIVED}
@@ -129,12 +133,25 @@ public class ChatsController {
                 c.getSequenceNumber(),
                 c.getQuery(),
                 c.getResponse(),
-                c.getContextData(),
+                jsonNodeToObject(c.getResponseData()),
+                jsonNodeToObject(c.getContextData()),
                 c.getCreatedAt(),
                 c.getAnswered(),
                 c.getUnansweredReason(),
                 c.getHelpful(),
                 c.getFeedbackComment()
         );
+    }
+
+    /**
+     * Converts a Jackson 2.x {@link JsonNode} into a plain {@code Object}
+     * graph (Map / List / scalars) so the response serialiser doesn't
+     * need to recognise our 2.x JsonNode type. See the field comment on
+     * {@code ChatMessageDto.responseData} for the version-mismatch
+     * background.
+     */
+    private Object jsonNodeToObject(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) return null;
+        return objectMapper.convertValue(node, Object.class);
     }
 }

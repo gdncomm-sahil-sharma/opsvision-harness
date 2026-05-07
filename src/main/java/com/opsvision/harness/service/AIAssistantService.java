@@ -106,6 +106,9 @@ public class AIAssistantService {
     @Autowired
     private QuestionRouter questionRouter;
 
+    @Autowired
+    private TimelineDateRepairer timelineDateRepairer;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile String llmPrompt;
@@ -161,6 +164,7 @@ public class AIAssistantService {
                     requestSpec.call().responseEntity(ChatResponseData.class);
 
             ChatResponseData responseData = entityResponse.entity();
+            timelineDateRepairer.repair(responseData);
             applyUsageMetadata(conversation, entityResponse.response());
 
             String summary = (responseData != null && responseData.getTextResponse() != null)
@@ -168,6 +172,7 @@ public class AIAssistantService {
                     : "(no summary)";
             conversation.setResponse(summary);
             conversation.setContextData(referencesAsJson(responseData));
+            conversation.setResponseData(responseDataAsJson(responseData));
             conversation.setAnswered(responseData != null ? responseData.getAnswered() : null);
             conversation.setUnansweredReason(responseData != null ? responseData.getUnansweredReason() : null);
             conversationRepository.save(conversation);
@@ -311,12 +316,14 @@ public class AIAssistantService {
                                     "structured-output parse failed: " + parseError.getMessage()));
                         }
                         if (data != null) {
+                            timelineDateRepairer.repair(data);
                             String summary = data.getTextResponse() != null
                                     ? data.getTextResponse().getSummary()
                                     : "(no summary)";
                             try {
                                 conv.setResponse(summary);
                                 conv.setContextData(referencesAsJson(data));
+                                conv.setResponseData(responseDataAsJson(data));
                                 conv.setAnswered(data.getAnswered());
                                 conv.setUnansweredReason(data.getUnansweredReason());
                                 // TODO: streaming-path token usage capture is non-trivial in
@@ -437,6 +444,21 @@ public class AIAssistantService {
             return objectMapper.valueToTree(data.getReferences());
         } catch (Exception e) {
             log.debug("Failed to serialize references for context_data: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Serialise the full {@link ChatResponseData} into a JsonNode for
+     * persistence in {@code conversation.response_data}. Returns null
+     * for null input so error turns don't write stub objects.
+     */
+    private JsonNode responseDataAsJson(ChatResponseData data) {
+        if (data == null) return null;
+        try {
+            return objectMapper.valueToTree(data);
+        } catch (Exception e) {
+            log.debug("Failed to serialize ChatResponseData for response_data: {}", e.getMessage());
             return null;
         }
     }

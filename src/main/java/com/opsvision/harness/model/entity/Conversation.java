@@ -40,6 +40,20 @@ public class Conversation {
     @Column(name = "context_data", columnDefinition = "jsonb")
     private JsonNode contextData;
 
+    /**
+     * Full {@code ChatResponseData} as JSON — bullets, timelines, table,
+     * references, plus the self-grade fields. Persisted alongside the
+     * legacy {@link #response} (summary only) and {@link #contextData}
+     * (references only) so the {@code /api/chats/{id}/messages} endpoint
+     * can return the same shape the UI saw when the turn was live, not
+     * a flattened version. Null on error turns and on streaming turns
+     * whose final parse failed; the endpoint falls back to the legacy
+     * fields in those cases.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "response_data", columnDefinition = "jsonb")
+    private JsonNode responseData;
+
     /** LLM self-grade: did this turn actually answer the user's question?
      *  Null = not graded yet (legacy rows or LLM forgot). Memory replay
      *  filters out only explicit {@code false}. */
@@ -155,6 +169,9 @@ public class Conversation {
     public void setContextData(JsonNode contextData) {
         this.contextData = contextData;
     }
+
+    public JsonNode getResponseData() { return responseData; }
+    public void setResponseData(JsonNode responseData) { this.responseData = responseData; }
 
     public Boolean getAnswered() {
         return answered;
