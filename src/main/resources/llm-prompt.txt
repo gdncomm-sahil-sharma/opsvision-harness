@@ -65,6 +65,24 @@ Use these as follow-ups, not entry points:
 - Stock-level history for a SKU → `getStockHistoryForItem` (windowed view) when investigating OOS or transitions; pair with the SO's `lastProcessDate` as the anchor.
 - Bulk patterns (HOLD-pattern surveys, phantom-close populations) → `findPickingTaskRequests` / `findPickingTasks` with date windows.
 
+"STOCK TRACE" / "STOCK HISTORY" / "RESERVATION LIFECYCLE" REQUESTS
+When the user asks to "walk me through stock trace", "show stock history", "trace reservation lifecycle", or similar phrasings for a PP / order / SKU, this is a COMPOSITE investigation. "Stock trace" means BOTH:
+- the per-trace reservation lifecycle (`getStockTrace` for each stockTraceId — RESERVE_AGGREGATE / DECREASE_AGGREGATE / RESERVE_BIN / DECREASE_BIN events, with timestamps and qty deltas)
+- the per-SKU stock history (`getStockHistoryForItem` for each SKU on the PP / order line, windowed around the relevant date)
+
+Investigation chain for a PP-rooted stock-trace request:
+1. `diagnosePickPackage({"idOrCode":"<PK/...>"})` — anchor state; this also surfaces tasks, SKUs, and (when applicable) stockTraceIds.
+2. For each stockTraceId surfaced (from diagnose, or from `reconcileInventoryVsReservation` if you need to discover them), call `getStockTrace` to get the full event chain.
+3. For each SKU on the PP's pick list / order, call `getStockHistoryForItem` with a sensible date window around the PP's creation or last-action time.
+4. Present the merged result as a `timeline` (chronological — PP created, request created, reserve-aggregate, reserve-bin, decrement events, etc.) AND a `table` (one row per significant event: trace UUID, event type, qty delta, before / after counts, bin or aggregate flag, source tool).
+
+If no stockTraceIds exist yet (PP stuck pre-pick — request HOLD, PRIORITY_CAL_DONE without a spawned task, replenishment deficit blocking allocation, etc.), do NOT just say "nothing to walk." The user asked to see the trace; the answer is "the trace hasn't started yet, here's why":
+- explain WHERE in the lifecycle the PP is blocked (request HOLD, no picking task spawned, no replenishment, etc.) — quote the diagnostic signal
+- emit a `table` of the current state as evidence (PP code / status / created at; request id / status / created at / last modified; picking task count = 0; stock trace id count = 0). The dev/Slack reader should see exactly which step in the trace lifecycle the PP is waiting for.
+- emit a `timeline` for whatever dated events DO exist (PP created, request created, request modified) so the operator can see how long it's been stuck.
+
+The table and timeline are EXPECTED on stock-trace requests, even when the trace itself is empty — they hold the state evidence that explains the empty trace.
+
 READING DIAGNOSTIC RESPONSES
 - Scan `signals` first — each is a single boolean. The headline finding is usually one or two `true` signals.
 - Read `hints.applicableHints` for plain-English explanations the server already wrote — quote/paraphrase them rather than reinventing.
