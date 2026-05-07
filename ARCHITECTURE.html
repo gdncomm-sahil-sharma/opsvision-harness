@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpsVision Harness — Design &amp; Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose', themeVariables: { fontSize: '14px' } });
+</script>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #555;
+    --bg: #ffffff;
+    --accent: #1f4e79;
+    --rule: #e3e3e3;
+    --code-bg: #f4f4f4;
+    --quote-bg: #fafafa;
+    --quote-bar: #c9c9c9;
+    --table-stripe: #f9f9f9;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 32px 96px;
+    line-height: 1.6;
+    font-size: 16px;
+  }
+  h1, h2, h3, h4 { font-weight: 600; line-height: 1.25; color: var(--fg); }
+  h1 {
+    font-size: 30px;
+    margin: 0 0 8px;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 8px;
+  }
+  h2 {
+    font-size: 22px;
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+    color: var(--accent);
+  }
+  h3 { font-size: 17px; margin-top: 28px; }
+  h4 { font-size: 15px; margin-top: 20px; color: var(--muted); }
+  p, ul, ol, table, pre, blockquote { margin: 12px 0; }
+  ul, ol { padding-left: 24px; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  blockquote {
+    margin: 16px 0;
+    padding: 12px 16px;
+    background: var(--quote-bg);
+    border-left: 3px solid var(--quote-bar);
+    color: var(--muted);
+    font-style: italic;
+  }
+  blockquote strong { font-style: normal; color: var(--fg); }
+  code {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 12px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.85em;
+    line-height: 1.45;
+  }
+  pre code { background: transparent; padding: 0; font-size: inherit; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.93em;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--table-stripe); }
+  .subtitle {
+    color: var(--muted);
+    font-size: 17px;
+    margin: 0 0 24px;
+    font-style: italic;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 32px;
+  }
+  .mermaid {
+    text-align: center;
+    margin: 24px 0;
+    padding: 16px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px solid var(--rule);
+  }
+  .toc {
+    background: #fafafa;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 16px 24px;
+    margin: 24px 0 40px;
+  }
+  .toc h3 { margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .toc ol { columns: 2; column-gap: 32px; padding-left: 20px; }
+  .toc li { margin: 2px 0; break-inside: avoid; }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 40px 0; }
+
+  /* Print-friendly: page break before each top-level section so this exports cleanly to PDF */
+  @media print {
+    body { max-width: none; padding: 24px; font-size: 12px; }
+    h2 { page-break-before: always; border-top: none; }
+    h2:first-of-type { page-break-before: avoid; }
+    .toc { page-break-after: always; }
+    .mermaid { page-break-inside: avoid; }
+    table { page-break-inside: avoid; }
+    a { color: var(--fg); text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>OpsVision Harness — Design &amp; Architecture</h1>
+<p class="subtitle">Conversational investigation harness for warehouse operations. Operators ask questions; an LLM agent calls warehouse-system tools and replies with structured, multi-turn answers.</p>
+<div class="meta">Last updated 2026-05-07 · Branch <code>feature/tech_fixes</code></div>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#problem">Problem</a></li>
+    <li><a href="#solution">Solution at a glance</a></li>
+    <li><a href="#stack">Stack</a></li>
+    <li><a href="#components">Component view</a></li>
+    <li><a href="#flow">Request flow</a></li>
+    <li><a href="#loop">The tool-calling loop</a></li>
+    <li><a href="#memory">Memory &amp; multi-turn continuity</a></li>
+    <li><a href="#response">Response shape</a></li>
+    <li><a href="#data">Data model</a></li>
+    <li><a href="#reliability">Reliability &amp; observability</a></li>
+    <li><a href="#decisions">Key design decisions</a></li>
+    <li><a href="#status">Status &amp; roadmap</a></li>
+    <li><a href="#ops">Operational notes</a></li>
+  </ol>
+</div>
+
+<h2 id="problem">1. Problem</h2>
+<p>Warehouse incidents (a pick package stuck mid-flow, an order missing a stock trace, a picker queue blocked) are diagnosed today by hand: SREs SSH into databases, run shape-specific queries, and stitch results together. Time-to-answer is high; institutional knowledge is locked in a few engineers' heads.</p>
+<p><strong>Goal:</strong> let an investigator type a question in plain English and get back a grounded, auditable answer — with a timeline of facts, a results table, and identifiers the next turn can build on.</p>
+<p><strong>Non-goals (for now):</strong> automatic remediation, real-time alerting, generative summaries unbacked by a tool call.</p>
+
+<h2 id="solution">2. Solution at a glance</h2>
+<div class="mermaid">
+flowchart LR
+    User[Investigator UI] -->|POST /api/chat| Harness
+    subgraph Harness [OpsVision Harness · Spring Boot]
+        Ctrl[Controllers] --> Svc[AIAssistantService]
+        Svc --> Mem[(Memory<br/>JpaChatMemory)]
+        Svc --> Cache[(Redis<br/>tool cache)]
+        Svc --> LLM[Spring AI<br/>ChatClient]
+        Svc --> Audit[(Postgres<br/>session/conv/tool_exec)]
+    end
+    LLM -->|tool calls| MCP[MCP Server<br/>:8081/mcp]
+    MCP -->|JDBC| WMS[(Warehouse Postgres<br/>QA cluster)]
+</div>
+<p>The harness is one Spring Boot service. It does not own warehouse data — it brokers between an LLM and an MCP tool server that fronts the warehouse databases. Everything else (memory, cache, audit, routing) is harness-side glue around Spring AI's tool-calling loop.</p>
+
+<h2 id="stack">3. Stack</h2>
+<table>
+  <thead><tr><th>Layer</th><th>Choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Runtime</td><td>Java 21, Spring Boot 4.0.6</td><td>Team standard; native tool-callback support in Spring AI</td></tr>
+    <tr><td>LLM framework</td><td>Spring AI 2.0.0-M5</td><td>First-class MCP client + structured-output + memory advisor</td></tr>
+    <tr><td>Default model</td><td><code>gpt-5.4-mini</code> (configurable via <code>OPENAI_MODEL</code>)</td><td>Cheap, low-latency, strong tool-calling</td></tr>
+    <tr><td>Tool transport</td><td>MCP streamable-http → <code>localhost:8081/mcp</code></td><td>MCP server is a separate repo; handles all warehouse-DB access</td></tr>
+    <tr><td>Persistence</td><td>Postgres 15+ (Flyway-migrated)</td><td>Sessions, conversations, tool-execution audit</td></tr>
+    <tr><td>Cache</td><td>Redis 7 (Lettuce)</td><td>Tool-result cache (30 min TTL)</td></tr>
+    <tr><td>Reliability</td><td>Resilience4j circuit breaker on MCP</td><td>70 %/15 s default; isolates harness from MCP outages</td></tr>
+  </tbody>
+</table>
+<blockquote><strong>Note:</strong> README mentions Gemini — that's stale. The project moved to OpenAI's gpt-5 family. <code>max-completion-tokens</code> is the only token-limit field that works; <code>max-tokens</code> is rejected by the gpt-5 family.</blockquote>
+
+<h2 id="components">4. Component view</h2>
+<div class="mermaid">
+flowchart TB
+    subgraph CTRL [Controllers]
+        SC[SimpleChatController<br/>POST /api/chat<br/>POST /api/chat/stream]
+        CC[ChatsController<br/>list/messages/rename/archive/feedback]
+    end
+
+    subgraph SVC [Service layer]
+        AIS[AIAssistantService<br/>tool-calling loop]
+        SS[SessionService<br/>chat lifecycle]
+        QR[QuestionRouter<br/>regex hint pre-classifier]
+        CSI[CriticalSignalInspector<br/>post-tool nudge injector]
+        TDR[TimelineDateRepairer]
+        JCS[JsonComponentSplitter<br/>streaming JSON splitter]
+        TCC[TokenCostCalculator]
+        MSH[McpSessionHealthMonitor]
+    end
+
+    subgraph SAI [Spring AI integrations]
+        Client[ChatClient]
+        Mem[MessageChatMemoryAdvisor]
+        Tools[SyncMcpToolCallbackProvider]
+        RTC[RecordingToolCallback<br/>per-request context]
+    end
+
+    subgraph DATA [Data layer]
+        SR[SessionRepository]
+        CR[ConversationRepository]
+        TR[ToolExecutionRepository]
+        JCMR[JpaChatMemoryRepository]
+    end
+
+    SC --> AIS
+    CC --> SS
+    AIS --> SS
+    AIS --> QR
+    AIS --> CSI
+    AIS --> TDR
+    AIS --> JCS
+    AIS --> TCC
+    AIS --> Client
+    Client --> Mem
+    Client --> Tools
+    Tools --> RTC
+    Mem --> JCMR
+    SS --> SR
+    AIS --> CR
+    RTC --> TR
+    RTC -.cache.-> Redis[(Redis)]
+    RTC -.HTTP.-> MCP[MCP Server]
+</div>
+<p><strong>Single chat orchestrator.</strong> Both <code>/api/chat</code> and <code>/api/chat/stream</code> route into <code>AIAssistantService</code>. Don't add a second chat service — consolidate here.</p>
+<table>
+  <thead><tr><th>Component</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td><code>AIAssistantService</code></td><td>Drives Spring AI's tool-calling loop, shapes structured output, persists turn</td></tr>
+    <tr><td><code>SessionService</code></td><td>Resolves chat by id, enforces ownership, manages active/archived state</td></tr>
+    <tr><td><code>QuestionRouter</code></td><td>Pre-classifies user message by regex (PP code, picker code, order_item_id shape …) → routing hint</td></tr>
+    <tr><td><code>CriticalSignalInspector</code></td><td>Post-tool inspector — appends "chain required" nudge when a tool result matches a known pattern</td></tr>
+    <tr><td><code>RecordingToolCallback</code></td><td>Wraps each MCP tool: cache lookup, audit row, not-found augmentation, SSE emission</td></tr>
+    <tr><td><code>JpaChatMemoryRepository</code></td><td>Replays prior turns from <code>conversation</code> table under a token budget for memory advisor</td></tr>
+    <tr><td><code>TimelineDateRepairer</code></td><td>Reconciles LLM-emitted timeline dates against ISO timestamps in description fields</td></tr>
+    <tr><td><code>JsonComponentSplitter</code></td><td>Splits accumulating SSE JSON so UI can render <code>textResponse</code> before <code>table</code> arrives</td></tr>
+    <tr><td><code>McpSessionHealthMonitor</code></td><td>Tracks MCP transport health; surfaces circuit-breaker state</td></tr>
+    <tr><td><code>TokenCostCalculator</code></td><td>Per-model pricing table → cost per turn (written to <code>conversation.cost_usd</code>)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="flow">5. Request flow</h2>
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant C as Controller
+    participant S as AIAssistantService
+    participant SS as SessionService
+    participant CR as ConversationRepo
+    participant LLM as ChatClient (LLM)
+    participant RTC as RecordingToolCallback
+    participant R as Redis
+    participant MCP as MCP Server
+    participant TR as ToolExecutionRepo
+
+    U->>C: POST /api/chat {chatId?, message}
+    C->>S: generateStructuredResponse(...)
+    S->>SS: getOrCreateChat(userId, chatId)
+    SS-->>S: Session
+    S->>CR: persist initial Conversation row
+    S->>S: build hint via QuestionRouter
+    S->>LLM: prompt().toolCallbacks(RTC).call()
+    loop tool-calling loop (LLM-driven)
+        LLM->>RTC: call(toolName, args)
+        RTC->>R: GET sha256(toolName+args)
+        alt cache hit
+            R-->>RTC: cached result
+        else cache miss
+            RTC->>MCP: HTTP POST /mcp
+            MCP-->>RTC: result JSON
+            RTC->>R: SET (30 min TTL, skip if "not found")
+            RTC->>TR: persist ToolExecution audit row
+        end
+        RTC->>RTC: augment if empty / critical signal
+        RTC-->>LLM: result (+ optional nudge)
+    end
+    LLM-->>S: ChatResponseData (entity)
+    S->>S: TimelineDateRepairer.repair()
+    S->>CR: update Conversation (response + responseData + tokens + cost)
+    S-->>C: ChatTurnResult
+    C-->>U: 200 OK
+</div>
+<p><strong>Streaming variant</strong> (<code>/api/chat/stream</code>) follows the same pipeline on a <code>boundedElastic</code> worker and emits SSE events: <code>chatId</code> → <code>tool_call_start/end</code> (per MCP call) → <code>assistant_token</code> (per chunk) → <code>final</code> (parsed <code>ChatResponseData</code>).</p>
+
+<h2 id="loop">6. The tool-calling loop in detail</h2>
+<p>The LLM is in charge of <em>when</em> and <em>which</em> tools to call. The harness controls <em>how</em> each call is mediated.</p>
+<div class="mermaid">
+flowchart LR
+    LLM[LLM decides<br/>to call a tool] --> RTC{RecordingToolCallback}
+    RTC --> CACHE{Redis cache?}
+    CACHE -->|hit| INSPECT[CriticalSignalInspector]
+    CACHE -->|miss| MCP[MCP HTTP call]
+    MCP --> AUDIT[Persist ToolExecution]
+    AUDIT --> NF{empty result?}
+    NF -->|yes| AUG[augmentNotFoundResult<br/>routing hint]
+    NF -->|no| INSPECT
+    AUG --> INSPECT
+    INSPECT --> RET[return to LLM]
+    RET --> LLM2[LLM may call another tool<br/>or emit final answer]
+</div>
+<p>Three correctness levers live here:</p>
+<ol>
+  <li><strong>Cache</strong> — keyed by <code>sha256(toolName + JSON args)</code>, 30 min TTL. <strong>Skips not-found results</strong> so a wrong-tool call doesn't poison a turn that recovers with the right one.</li>
+  <li><strong>Loop 1 nudge</strong> (<code>augmentNotFoundResult</code>) — when MCP returns an empty entity, the harness appends a generic routing hint so the LLM can self-correct in-loop (e.g., retry with <code>getPickPackage</code> after <code>getPickList</code> returned empty for a PP-shaped input). Generic across all tools.</li>
+  <li><strong>Critical-signal inspector</strong> — when a successful tool result matches a configured rule (e.g., <code>diagnosePickPackage</code> returns 0 allocations + no terminal signals), append a "chain required" nudge naming the next tool to call. Rules are config-driven (<code>critical-signals.rules</code> in <code>application.yml</code>).</li>
+</ol>
+<blockquote><strong>Per-request context (conversationId, invokedTools, userId, optional SSE sink) is constructor-injected into <code>RecordingToolCallback</code> — not via ThreadLocals.</strong> ThreadLocals don't propagate across Reactor schedulers; that previously broke streaming-path audit persistence and log MDC.</blockquote>
+
+<h2 id="memory">7. Memory &amp; multi-turn continuity</h2>
+<div class="mermaid">
+flowchart LR
+    Turn1[Turn 1 question] --> LLM1[LLM]
+    LLM1 -->|references map| C1[(conversation.context_data<br/>+ response_data)]
+    Turn2[Turn 2 'yes pull stock trace'] --> Mem[JpaChatMemoryRepository]
+    C1 --> Mem
+    Mem -->|token-budgeted replay<br/>refs + answered + summary| LLM2[LLM]
+    LLM2 --> Out[Resolved answer<br/>without re-asking subject]
+</div>
+<p>Two complementary mechanisms:</p>
+<ul>
+  <li><strong><code>MessageChatMemoryAdvisor</code></strong> keyed on <code>session.id</code>. Spring AI replays alternating user/assistant messages on each turn; memory budget is <code>max-messages: 20</code>, <code>max-tokens: 4000</code>. Right now the repository implementation runs in-process — restart wipes memory. Persisting via <code>JpaChatMemoryRepository</code> is staged but not yet wired in.</li>
+  <li><strong><code>ChatResponseData.references</code></strong> — a flat map (<code>pickPackageCode</code>, <code>stockTraceIds</code>, <code>pickListId</code>, …) that the LLM populates each turn. Carried into the next turn through memory replay so follow-ups like "pull the stock trace" resolve the implicit subject without fabrication.</li>
+</ul>
+
+<h2 id="response">8. Response shape — <code>ChatResponseData</code></h2>
+<p>Returned to the UI and persisted to <code>conversation.response_data</code> (JSONB).</p>
+<pre><code>{
+  "textResponse": {
+    "summary": "PP is waiting for a free picker.",
+    "bullets": [
+      "All 479 trained pickers are busy or offline",
+      "Will move when a picker is freed",
+      "Re-check in 30 minutes"
+    ]
+  },
+  "timelines": {
+    "data": [
+      { "title": "PP created",      "description": "PK/MAR-01/V-2026/223506 created at 2026-05-07T08:30:21Z", "date": 1714993821296 },
+      { "title": "Picker assigned", "description": "Assigned PIC-0000000818 at 2026-05-07T08:45:15Z",          "date": 1714994715123 }
+    ]
+  },
+  "table": {
+    "headers": ["Status", "Zone", "Eligible Pickers", "Available"],
+    "rows":    [["PARTIAL_PACKAGE", "AT_WZ_GF_46001", "479", "0"]]
+  },
+  "references": {
+    "pickPackageCode": "PK/MAR-01/V-2026/223506",
+    "pickListId":      106641,
+    "stockTraceIds":   ["474f98bd-7a6e-4c90-98da-f084cc073d9f"],
+    "siteCode":        "MAR-01"
+  },
+  "answered": true,
+  "unansweredReason": null
+}</code></pre>
+<table>
+  <thead><tr><th>Field</th><th>Audience</th><th>Tone</th></tr></thead>
+  <tbody>
+    <tr><td><code>textResponse</code></td><td>end-user investigator</td><td>operations-team plain English</td></tr>
+    <tr><td><code>table</code></td><td>dev / Slack-paste</td><td>raw enum codes, untranslated</td></tr>
+    <tr><td><code>timelines</code></td><td>UI timeline component</td><td>facts only; no inferences</td></tr>
+    <tr><td><code>references</code></td><td>next turn (machine-readable)</td><td>flat map of identifiers</td></tr>
+    <tr><td><code>answered</code> / <code>unansweredReason</code></td><td>self-grade telemetry</td><td><code>false</code> flags structural gaps to triage</td></tr>
+  </tbody>
+</table>
+
+<h2 id="data">9. Data model</h2>
+<div class="mermaid">
+erDiagram
+    SESSION ||--o{ CONVERSATION : has
+    CONVERSATION ||--o{ TOOL_EXECUTION : audits
+    SESSION {
+        uuid id PK
+        string user_id
+        string title
+        enum status "ACTIVE | ARCHIVED"
+        string initial_query
+        timestamp created_at
+        timestamp updated_at
+    }
+    CONVERSATION {
+        uuid id PK
+        uuid session_id FK
+        int sequence_number
+        text query
+        text response
+        jsonb context_data "references map"
+        jsonb response_data "full ChatResponseData"
+        bool answered
+        string unanswered_reason
+        bool helpful "user feedback"
+        string feedback_comment
+        int prompt_tokens
+        int completion_tokens
+        int total_tokens
+        numeric cost_usd
+        string model
+        timestamp created_at
+    }
+    TOOL_EXECUTION {
+        uuid id PK
+        uuid conversation_id FK
+        string tool_name
+        jsonb parameters
+        jsonb result
+        int execution_time_ms
+        enum status "PENDING | SUCCESS | FAILED"
+        string error_message
+        timestamp created_at
+    }
+</div>
+<p>Schema is locked by Flyway migrations V1–V5; <code>hibernate.ddl-auto=validate</code> (no auto-create — Flyway is authoritative).</p>
+
+<h2 id="reliability">10. Reliability &amp; observability</h2>
+<h3>Reliability</h3>
+<ul>
+  <li><strong>Circuit breaker on MCP</strong> (Resilience4j): 70 % failure-rate threshold over 20-call window, 15 s open-state, half-open after recovery.</li>
+  <li><strong>Tool-result cache</strong> absorbs retry storms during MCP hiccups.</li>
+  <li><strong>Cache poison protection</strong> — empty/not-found results are never cached.</li>
+  <li><strong>Graceful streaming errors</strong> — <code>StreamEvent.error()</code> instead of HTTP 500.</li>
+</ul>
+<h3>Observability</h3>
+<ul>
+  <li><strong>MDC log tagging</strong> — every chat-turn log line carries <code>[user=… conv=…]</code> via the <code>withMdc</code> helper. ThreadLocals don't propagate across Reactor schedulers, so the helper scopes MDC explicitly inside <code>doOn*</code> callbacks.</li>
+  <li><strong><code>tool_execution</code> audit</strong> — every MCP call lands a row with parameters, result, latency, status, error.</li>
+  <li><strong>Self-grade signal</strong> — <code>answered=false</code> rows surface structural gaps for triage.</li>
+  <li><strong>Token + cost</strong> — per-turn tokens and dollar cost on every <code>conversation</code> row.</li>
+  <li><strong>Metrics</strong> — <code>mcp.cache</code> (hit/miss), <code>mcp.tool.latency</code> (p50/p95/p99 per tool).</li>
+</ul>
+
+<h2 id="decisions">11. Key design decisions</h2>
+<table>
+  <thead><tr><th>Decision</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Single <code>AIAssistantService</code> for sync + streaming</td><td>One source of truth for the loop; streaming is just an SSE sink injected into the same path</td></tr>
+    <tr><td>Per-request context via constructor injection (no ThreadLocals)</td><td>Reactor schedulers break ThreadLocals — visible failure mode was missing audit rows on the streaming path</td></tr>
+    <tr><td>Wrong-tool detection lives <strong>harness-side</strong>, not MCP-side</td><td>MCP is intent-blind; correction signals (Loop 1 nudge, critical-signal inspector) belong where intent is known</td></tr>
+    <tr><td>Structured output via <code>entity(ChatResponseData.class)</code></td><td>Lets us treat the response as a typed object, repair timelines, and persist a JSONB blob — no regex over LLM prose</td></tr>
+    <tr><td>Cache skips not-found results</td><td>A wrong-tool miss must not poison the turn that retries with the right tool</td></tr>
+    <tr><td>Eval harness deferred</td><td>Pre-built eval cases over-fit to imagination, not real failure modes; wait until production traffic seeds the failure set</td></tr>
+    <tr><td>In-process memory (for now)</td><td>Pragmatic during pre-prod; <code>JpaChatMemoryRepository</code> is the planned upgrade once we decide what shape "long-lived chat memory" should take</td></tr>
+  </tbody>
+</table>
+
+<h2 id="status">12. Status &amp; roadmap</h2>
+<h3>Shipped on <code>feature/tech_fixes</code></h3>
+<ul>
+  <li>Per-session memory advisor + tool-result cache</li>
+  <li><code>tool_execution</code> audit table</li>
+  <li>Structured output via <code>ChatResponseData</code></li>
+  <li>SSE streaming endpoint</li>
+  <li>MDC-tagged structured logs</li>
+  <li>Loop 1 routing-hint nudge on empty MCP results</li>
+  <li><code>RecordingToolCallback</code> with constructor-injected per-request context</li>
+</ul>
+<h3>Parked (intentionally)</h3>
+<ul>
+  <li>Full eval harness (waiting for production failure modes)</li>
+  <li><code>JpaChatMemoryRepository</code> (durable conversation memory across restarts)</li>
+  <li>Plan-then-execute split (single-stage tool calling is fine for now)</li>
+  <li>RAG over runbooks</li>
+  <li>JSON-encoded production logs</li>
+</ul>
+<h3>Known gaps</h3>
+<ul>
+  <li><code>Conversation.context_data</code> JSONB column is never written. Either wire <code>references</code> into it per turn or drop the column.</li>
+  <li><code>app.session.max-active-per-user=5</code> config doesn't match <code>SessionService</code> returning exactly one active session. Reconcile config with reality.</li>
+  <li>Memory is in-process — restart loses chat history.</li>
+</ul>
+
+<h2 id="ops">13. Operational notes</h2>
+<ul>
+  <li><strong>VPN required</strong> — MCP server reaches <code>central-postgres13-01.qa2-sg.cld</code>. Off-VPN, every tool call fails with <code>Could not open JDBC Connection for transaction</code>.</li>
+  <li><strong>MCP server is a separate repo</strong> at <code>/Users/jimmy.nongmaithem/work/scps/opsvision-mcp-server</code>, runs on <code>:8081</code>, owns its own DB credentials.</li>
+  <li><strong>Bring up order:</strong> Postgres + Redis (docker-compose) → MCP server (<code>:8081</code>) → harness (<code>mvn spring-boot:run</code>, <code>:8080</code>).</li>
+  <li><strong>Verification baseline:</strong> <code>~/Downloads/WCS phantom-close investigation — 2026-05-04.pdf</code> is the source of truth — 8 single-turn questions plus a 3-turn flow (224143 → reconcile → stock trace). Latest baseline: 7/8 strong, multi-turn working, Q6 partial closed via Loop 1 nudge.</li>
+</ul>
+
+</body>
+</html>
